@@ -2,148 +2,52 @@
 
 > Apply before everyone else does.
 
-EarlyBird is a Python-based job search automation pipeline built for students and early-career engineers who want to maximize their chances by applying to roles as soon as they are posted, before listings hit mass job boards and inboxes flood with applicants.
+EarlyBird is a job search automation pipeline for students and early-career engineers who want to apply to roles within hours of posting — before listings hit mass job boards and inboxes flood with applicants.
 
-Most job seekers find openings on LinkedIn or Indeed, where a posting may already be 2-3 days old and have hundreds of applicants. EarlyBird goes directly to the source: polling company ATS systems (Greenhouse, Lever), VC portfolio job boards, and a hardcoded watchlist of 80+ target companies to surface roles within hours of posting.
-
-Run it every morning. Open the Excel output. Apply first.
+It polls company ATS systems (Greenhouse, Lever), runs live web searches for campus recruiters, drafts personalized outreach messages, and outputs a color-coded Excel tracker. There is also a React dashboard for viewing results.
 
 ---
 
-## Why EarlyBird
+## Features
 
-Timing is one of the most underrated factors in internship and new grad hiring. Recruiters often review applications in the order they arrive, and many roles are filled before they even trend on LinkedIn. EarlyBird is built around that reality.
-
-- Finds jobs hours before they reach LinkedIn or Indeed
-- Filters by your target geography and remote preferences
-- Scores each role by skill match so you triage smarter
-- Surfaces ranked outreach contacts per company (alumni, recruiters, engineers) so you know exactly who to reach out to
-- Logs everything to a color-coded Excel tracker with direct apply links
-- Runs automatically every morning via Task Scheduler or cron
-
----
-
-## What It Does
-
-1. Aggregates job postings from Greenhouse ATS, Lever ATS, LinkedIn, Indeed, and a direct watchlist of 80+ companies
-2. Pulls from VC portfolio boards: YC Work at a Startup, a16z, First Round Capital, Contrary Capital, Dreamit Ventures
-3. Aggregates from staffing firms: Robert Half, Theoris, TEKsystems, Apex Systems, Insight Global
-4. Filters by your configured target locations and remote preferences
-5. Scores each listing against your skill set using keyword overlap
-6. Deduplicates across sources so the same role does not appear twice
-7. Flags anything posted under 6 hours ago as URGENT (red row in Excel)
-8. Researches outreach contacts per company via web search, ranked by leverage (alumni, recruiter, engineer)
-9. Outputs a color-coded Excel file with role, company, location, match score, apply link, posting age, and outreach contacts
-10. **(NEW)** Scrapes Philadelphia-area VC portfolio pages daily for early-stage startups
-11. **(NEW)** Looks up CEO/founder contact info via Apollo.io API
-12. **(NEW)** Auto-generates personalized cold outreach emails via Claude API
-13. **(NEW)** Creates Gmail drafts for one-click sending
+- Scrapes Greenhouse, Lever, LinkedIn, Indeed, Wellfound within hours of posting
+- Filters by US location and remote — no international noise
+- Scores each role 0-100 by keyword match against your background
+- Deduplicates across sources so the same role never appears twice
+- Uses Claude API with live web search to find real campus recruiters by name
+- Drafts personalized LinkedIn messages and emails per contact
+- Generates a color-coded Excel file: green = posted under 6h, blue = under 24h, yellow = under 48h
+- Cold outreach tab: researches campus recruiters at target companies even with no open roles
+- Apollo Lookup links and Company Domain columns for email pattern discovery
+- Prints tool-use block count to confirm web search is actually running
 
 ---
 
-## Cold Outreach (NEW)
+## Dashboard (React)
 
-EarlyBird now includes a **Cold Outreach module** that helps you reach out directly to startup founders and CEOs, bypassing the traditional application process entirely.
+A React + Vite frontend is included in `earlybird-ui/` and deployed to Vercel.
 
-### How It Works
+It includes:
+- Dashboard with stat cards, fresh job highlights, outreach to-do list, source breakdown
+- Job Leads table with search, filter, and color-coded rows
+- Outreach panel with LinkedIn message and email draft per contact
+- Cold Outreach table with Apollo links and editable email pattern fields
+- Settings page for profile, pipeline config, and API key status
 
-1. **VC Portfolio Discovery**: Scrapes 4 Philadelphia-area VC portfolio pages daily:
-   - Robin Hood Ventures
-   - Osage Venture Partners
-   - DreamIT Ventures (SecureTech & HealthTech)
-   
-2. **Contact Enrichment**: Uses Apollo.io API to find CEO/founder contact info:
-   - Full name, title, email, LinkedIn profile URL
-   - Estimated company size
-   - Caches results to avoid API quota overages
-   
-3. **Email Drafting**: Generates personalized cold emails via Claude API
-   - Context-aware based on your background and the company
-   - Stored in `data/drafts/` for review
-   - Email preview shown in Excel tracker
-   
-4. **Gmail Integration**: Optionally creates Gmail drafts
-   - Quick-access links in Excel tracker
-   - Ready to send or customize further
+**Live:** [earlybird-ui.vercel.app](https://earlybird-ui.vercel.app)
 
-### Getting Started with Cold Outreach
-
-#### 1. Get an Apollo.io API Key
-Visit [apollo.io/settings/integrations](https://app.apollo.io/settings/integrations) and copy your API key.
-
-#### 2. Add to .env
+To run locally:
 ```bash
-APOLLO_API_KEY=your_api_key_here
-```
-
-#### 3. Test It Out
-```bash
-python job_pipeline_full.py --test-cold-outreach
-```
-
-This runs in test mode (dry-run) on a single VC source with a cap of 2 companies. Verify the output looks good.
-
-#### 4. Run Daily
-```bash
-python job_pipeline_full.py --hours 24
-```
-
-A new sheet called "Cold Outreach" will appear in your Excel output with:
-- Company name, contact name, title
-- Email (highlighted if estimated)
-- LinkedIn profile link
-- Company website
-- Email draft preview (click to see full draft in `data/drafts/`)
-- Gmail draft link (if Gmail is configured)
-- Outreach status tracker (update as you send emails)
-
-### Important Notes
-
-- **Email Verification**: Estimated emails are flagged with yellow highlight. Verify before sending.
-- **Deduplication**: Cold Outreach remembers companies it's already processed. Run daily and it only surfaces new companies.
-- **Rate Limits**: Apollo.io free tier allows 50 requests/day. EarlyBird caps to 10 per day to stay safe.
-- **Cold Email Best Practices**: Always personalize based on the company. Use the email draft as a template, not verbatim.
-
----
-
-## Flags & Options
-
-```bash
-# Skip cold outreach entirely
-python job_pipeline_full.py --no-cold-outreach
-
-# Test cold outreach (dry-run, doesn't update dedup DB)
-python job_pipeline_full.py --test-cold-outreach
-
-# Skip email/Gmail setup (useful for CI/CD)
-python job_pipeline_full.py --no-email
-
-# Scrape jobs from last 24 hours only
-python job_pipeline_full.py --hours 24
-
-# Debug mode — print every rejected job with reason
-python job_pipeline_full.py --debug
-
-# Scrape only, skip Claude API and Gmail
-python job_pipeline_full.py --scrape-only
+cd earlybird-ui
+npm install
+npm run dev
 ```
 
 ---
 
-## Stack
+## Quickstart
 
-- Python 3.10+
-- [JobSpy](https://github.com/cullenwatson/JobSpy) for LinkedIn and Indeed aggregation
-- openpyxl for Excel output
-- BeautifulSoup for ATS and careers page aggregation
-- Greenhouse and Lever public APIs for direct company job polling
-- python-dotenv for environment variable management
-
----
-
-## Setup
-
-### 1. Clone the repo
+### 1. Clone
 
 ```bash
 git clone https://github.com/anishkask/EarlyBird.git
@@ -156,57 +60,78 @@ cd EarlyBird
 pip install -r requirements.txt
 ```
 
-### 3. Set up environment variables
-
-Copy `.env.example` to `.env` and fill in your values:
+### 3. Configure environment
 
 ```bash
 cp .env.example .env
 ```
 
+Fill in `.env`:
+
 ```
-YOUR_NAME=                # your full name
-YOUR_SCHOOL=              # your university (used in contact research)
-YOUR_LINKEDIN=            # linkedin.com/in/yourhandle
-YOUR_PORTFOLIO=           # yoursite.com (optional)
-YOUR_GITHUB=              # github.com/yourusername
-```
-
-### 4. Configure your search
-
-Open `job_pipeline_full.py` and update the configuration block at the top:
-
-```python
-# Your skills -- used for match scoring
-MY_SKILLS = ["Python", "TypeScript", "React", "FastAPI", "PostgreSQL",
-             "REST APIs", "Docker", "SQL", "RAG pipelines"]
-
-# Target locations -- add your own city, state, or region
-TARGET_LOCATIONS = ["Your City", "Your State", "Remote", "United States"]
-
-# Role keywords -- what kinds of roles to surface
-ROLE_KEYWORDS = ["software engineer", "software developer", "backend", "frontend",
-                 "full stack", "AI", "ML", "data engineer", "platform engineer"]
+ANTHROPIC_API_KEY=sk-ant-...
+YOUR_NAME=Your Name
+YOUR_EMAIL=you@email.com
+YOUR_SCHOOL=Your University
+YOUR_LINKEDIN=https://linkedin.com/in/yourhandle
+MY_BACKGROUND=Brief summary of your skills and experience
 ```
 
-To add companies to the direct ATS watchlist, find the `WATCHLIST` dictionary and add entries:
-
-```python
-"company-greenhouse-token": "greenhouse",
-"company-lever-slug": "lever",
-```
-
-### 5. Run it
+### 4. Run
 
 ```bash
+# Standard run — last 72 hours
 python job_pipeline_full.py
-```
 
-To limit to jobs posted in the last 24 hours:
-
-```bash
+# Fresh only
 python job_pipeline_full.py --hours 24
+
+# Include cold outreach (campus recruiter research)
+python job_pipeline_full.py --hours 72 --cold-outreach
+
+# Skip email sending
+python job_pipeline_full.py --no-email
+
+# Scrape only, skip all Claude API calls
+python job_pipeline_full.py --scrape-only
 ```
+
+---
+
+## How It Works
+
+1. Scrapes Greenhouse and Lever ATS boards using their public APIs
+2. Aggregates LinkedIn and Indeed via JobSpy
+3. Filters to US/remote only, deduplicates by company + title
+4. For each fresh job (under 96h), calls Claude API with web search enabled to find real recruiter contacts
+5. Drafts a LinkedIn message and email per contact using your background
+6. Optionally runs cold outreach: searches for campus recruiters at all companies in your watchlist, even those with no current openings
+7. Writes everything to a timestamped Excel file with three tabs: Jobs, Outreach, Cold Outreach
+
+---
+
+## Excel Output
+
+**Jobs tab** — color-coded by posting age, with apply links and match scores
+
+**Outreach tab** — contact name, title, LinkedIn URL, drafted message and email, plus:
+- Company Domain (extracted from apply link)
+- Apollo Lookup (clickable link to search contacts by domain)
+- Email Pattern (blank column for manual entry)
+
+**Cold Outreach tab** — same structure, for proactive outreach at companies with no current openings
+
+---
+
+## Web Search Confirmation
+
+Every run prints:
+
+```
+Tool-use blocks in Claude API responses: N
+```
+
+If N is 0, web search is not being invoked. If N > 0, real-time recruiter search is working. Each web search call uses approximately 10k tokens, so the free API tier (30k tokens/min) processes about 3 companies per minute.
 
 ---
 
@@ -214,96 +139,55 @@ python job_pipeline_full.py --hours 24
 
 ### Windows (Task Scheduler)
 
-1. Create `run_earlybird.bat` in the project folder:
+Create `run_earlybird.bat`:
 
 ```bat
 @echo off
 cd C:\path\to\EarlyBird
-python job_pipeline_full.py >> logs\pipeline_log.txt 2>&1
+python job_pipeline_full.py --hours 24 >> logs\pipeline_log.txt 2>&1
 ```
 
-2. Create a `logs\` folder in the project directory
-3. Open Task Scheduler and click "Create Basic Task"
-4. Set trigger to Daily at your preferred time (8 AM recommended)
-5. Set action to run `run_earlybird.bat`
-6. Under Conditions, check "Wake the computer to run this task" if your machine sleeps overnight
+Set a daily trigger at 8 AM in Task Scheduler.
 
 ### Mac / Linux (cron)
 
 ```bash
 crontab -e
-```
-
-Add:
-
-```
-0 8 * * * cd /path/to/EarlyBird && python job_pipeline_full.py >> logs/pipeline_log.txt 2>&1
+# Add:
+0 8 * * * cd /path/to/EarlyBird && python job_pipeline_full.py --hours 24 >> logs/pipeline_log.txt 2>&1
 ```
 
 ---
 
-## Output
+## Stack
 
-Each run generates a timestamped Excel file (e.g. `job_leads_2026-04-14_08-00.xlsx`) with two tabs:
+**Pipeline**
+- Python 3.10+
+- [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python) with `web_search_20250305` tool
+- [JobSpy](https://github.com/cullenwatson/JobSpy) for LinkedIn and Indeed
+- openpyxl, BeautifulSoup, requests, python-dotenv
 
-**Jobs tab**
-
-- Role title, company, location, source, hours since posted
-- Direct apply link
-- Match score (0-100 based on skill overlap)
-- Color coding: red = URGENT (under 6h), green = fresh (under 24h), yellow = recent (24-72h)
-
-**Outreach tab**
-
-- Contact name, title, company, LinkedIn URL
-- Leverage score (alumni ranked highest, then recruiter, then engineer)
+**Dashboard**
+- React + Vite
+- Tailwind CSS v3
+- Deployed on Vercel
 
 ---
 
-## Important Notes
+## Notes
 
-- **LinkedIn and Indeed** are aggregated via JobSpy. Aggregating these platforms may violate their terms of service. Use responsibly and do not run more than once per day.
-- **ZipRecruiter** blocks automated access and is excluded from this pipeline.
-- **LinkedIn outreach and email drafting are intentionally manual** -- the tool surfaces who to contact and ranks them by leverage, but writing and sending messages is left to you.
-- **Never commit** `.env`, `token.json`, `credentials.json`, or any `*.xlsx` output files. All are included in `.gitignore`.
-
----
-
-## .gitignore
-
-Your `.gitignore` should include at minimum:
-
-```
-.env
-token.json
-credentials.json
-credentials.json.json
-*.xlsx
-*.xls
-__pycache__/
-.mypy_cache/
-.venv/
-venv/
-logs/
-*.pyc
-.DS_Store
-```
+- LinkedIn and Indeed scraping via JobSpy may conflict with their terms of service. Run at most once per day.
+- Never commit `.env`, `token.json`, `credentials.json`, or `*.xlsx` files — all are in `.gitignore`.
+- The `--cold-outreach` flag spaces API calls 22 seconds apart to avoid rate limits. For 10 companies expect about 4 minutes.
 
 ---
 
 ## Roadmap
 
-- [ ] Slack or email digest summarizing each morning's run
-- [ ] Browser extension to one-click add a company to the watchlist
-- [ ] Resume-to-job matching using embeddings instead of keyword overlap
-- [ ] Contact discovery via Crunchbase API for seed-stage companies
-- [ ] Handshake integration for student-exclusive postings
-
----
-
-## Contributing
-
-Pull requests welcome. If you add a new ATS source, job board, or VC portfolio board, open a PR with the source added to the appropriate scraper and a note in this README.
+- Connect dashboard to live pipeline output (FastAPI backend)
+- Resume-to-job matching using embeddings
+- Slack digest summarizing each morning's run
+- Handshake integration for student-exclusive postings
 
 ---
 
