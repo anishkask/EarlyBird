@@ -429,7 +429,7 @@ def find_contacts(company, role, client):
     global tool_use_block_count
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=1000,
             tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=[{
@@ -476,7 +476,7 @@ def draft_messages(company,role,url,contact,client):
     angle=(f"I noticed we both went to {school}!" if "alumni" in reason.lower() or school.lower().split()[0] in reason.lower()
            else f"I came across your profile while researching {company}.")
     try:
-        r=client.messages.create(model="claude-sonnet-4-20250514",max_tokens=700,
+        r=client.messages.create(model="claude-sonnet-4-5",max_tokens=700,
             messages=[{"role":"user","content":f"""Draft outreach from {YOUR_NAME} to {name or 'this person'} at {company} re: {role}.
 Connection: {angle}
 Background: {MY_BACKGROUND}
