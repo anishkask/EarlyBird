@@ -15,8 +15,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Seconds to wait between API calls to avoid rate limits (web search uses ~10k tokens/call)
-# At 30k tokens/min limit, each call needs ~45s gap to stay safely under 13k tokens/min (~one call every 45s)
-COLD_OUTREACH_DELAY = 45
+# At 30k tokens/min limit, each call needs ~20s gap to be safe
+COLD_OUTREACH_DELAY = 22
 
 load_dotenv(override=True)
 
@@ -107,15 +107,14 @@ def classify_company(company_name, website, client):
         return True  # Default to include if classification fails
 
 
-def run_cold_outreach(companies, client, classify=False, max_companies=None):
+def run_cold_outreach(companies, client, classify=False):
     """
     Run cold outreach research for a list of companies.
 
     Args:
-        companies:     list of company dicts (name, website) or plain strings
-        client:        anthropic.Anthropic client
-        classify:      if True, first verify company hires interns (costs extra API call)
-        max_companies: if set, limit research to this many companies
+        companies: list of company dicts (name, website) or plain strings
+        client:    anthropic.Anthropic client
+        classify:  if True, first verify company hires interns (costs extra API call)
 
     Returns:
         list of dicts with keys: site, company, contact_name, title,
@@ -123,16 +122,6 @@ def run_cold_outreach(companies, client, classify=False, max_companies=None):
     """
     results = []
     today = datetime.now().strftime("%Y-%m-%d")
-
-    # Limit to max_companies if specified
-    if max_companies is not None:
-        companies = companies[:max_companies]
-
-    # Print estimate before starting
-    num_companies = len(companies)
-    estimated_seconds = num_companies * COLD_OUTREACH_DELAY
-    estimated_minutes = estimated_seconds / 60
-    print(f"[Cold Outreach] Researching {num_companies} companies (~{estimated_minutes:.0f}m estimated, {COLD_OUTREACH_DELAY}s between calls)...\n")
 
     for company in companies:
         if isinstance(company, str):

@@ -695,7 +695,6 @@ def write_excel(jobs, outreach, cold_outreach_data=None):
         ["   Dry run", "python job_pipeline_full.py --no-email"],
         ["   Fresh only", "python job_pipeline_full.py --hours 12"],
         ["   Cold outreach", "python job_pipeline_full.py --hours 72 --cold-outreach"],
-        ["   Cold outreach (custom limit)", "python job_pipeline_full.py --hours 72 --cold-outreach --cold-outreach-limit 10"],
     ]:
         ws_legend.append(legend_row)
     ws_legend.column_dimensions["A"].width = 20
@@ -713,8 +712,6 @@ def main():
                    help="Run scrapers and write Excel only — skip all Claude API and Gmail calls")
     p.add_argument("--cold-outreach", action="store_true",
                    help="Also run cold outreach contact research and add a Cold Outreach tab")
-    p.add_argument("--cold-outreach-limit", type=int, default=5,
-                   help="Limit cold outreach research to this many companies (default: 5)")
     args = p.parse_args()
 
     if not args.scrape_only:
@@ -867,9 +864,10 @@ def main():
     # ── Cold Outreach ─────────────────────────────────────────────────────────
     cold_outreach_data = []
     if args.cold_outreach and not args.scrape_only:
+        print("\nRunning cold outreach contact research...\n")
         from cold_outreach import run_cold_outreach
         import cold_outreach as _co_module
-        cold_outreach_data = run_cold_outreach(COMPANIES[:25], client, max_companies=args.cold_outreach_limit)
+        cold_outreach_data = run_cold_outreach(COMPANIES[:25], client)
         # Sync the tool_use block counter from the cold_outreach module
         global tool_use_block_count
         tool_use_block_count += _co_module.tool_use_block_count

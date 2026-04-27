@@ -17,7 +17,8 @@ Timing is one of the most underrated factors in internship and new grad hiring. 
 - Finds jobs hours before they reach LinkedIn or Indeed
 - Filters by your target geography and remote preferences
 - Scores each role by skill match so you triage smarter
-- Surfaces ranked outreach contacts per company (alumni, recruiters, engineers) so you know exactly who to reach out to
+- Researches outreach contacts per company and drafts personalized emails
+- Sends emails via Gmail with randomized delays
 - Logs everything to a color-coded Excel tracker with direct apply links
 - Runs automatically every morning via Task Scheduler or cron
 
@@ -25,117 +26,28 @@ Timing is one of the most underrated factors in internship and new grad hiring. 
 
 ## What It Does
 
-1. Aggregates job postings from Greenhouse ATS, Lever ATS, LinkedIn, Indeed, and a direct watchlist of 80+ companies
+1. Scrapes job postings from Greenhouse ATS, Lever ATS, LinkedIn, Indeed, and a direct watchlist of 80+ companies
 2. Pulls from VC portfolio boards: YC Work at a Startup, a16z, First Round Capital, Contrary Capital, Dreamit Ventures
-3. Aggregates from staffing firms: Robert Half, Theoris, TEKsystems, Apex Systems, Insight Global
+3. Scrapes staffing firms: Robert Half, Theoris, TEKsystems, Apex Systems, Insight Global
 4. Filters by your configured target locations and remote preferences
 5. Scores each listing against your skill set using keyword overlap
 6. Deduplicates across sources so the same role does not appear twice
 7. Flags anything posted under 6 hours ago as URGENT (red row in Excel)
 8. Researches outreach contacts per company via web search, ranked by leverage (alumni, recruiter, engineer)
-9. Outputs a color-coded Excel file with role, company, location, match score, apply link, posting age, and outreach contacts
-10. **(NEW)** Scrapes Philadelphia-area VC portfolio pages daily for early-stage startups
-11. **(NEW)** Looks up CEO/founder contact info via Apollo.io API
-12. **(NEW)** Auto-generates personalized cold outreach emails via Claude API
-13. **(NEW)** Creates Gmail drafts for one-click sending
-
----
-
-## Cold Outreach (NEW)
-
-EarlyBird now includes a **Cold Outreach module** that helps you reach out directly to startup founders and CEOs, bypassing the traditional application process entirely.
-
-### How It Works
-
-1. **VC Portfolio Discovery**: Scrapes 4 Philadelphia-area VC portfolio pages daily:
-   - Robin Hood Ventures
-   - Osage Venture Partners
-   - DreamIT Ventures (SecureTech & HealthTech)
-   
-2. **Contact Enrichment**: Uses Apollo.io API to find CEO/founder contact info:
-   - Full name, title, email, LinkedIn profile URL
-   - Estimated company size
-   - Caches results to avoid API quota overages
-   
-3. **Email Drafting**: Generates personalized cold emails via Claude API
-   - Context-aware based on your background and the company
-   - Stored in `data/drafts/` for review
-   - Email preview shown in Excel tracker
-   
-4. **Gmail Integration**: Optionally creates Gmail drafts
-   - Quick-access links in Excel tracker
-   - Ready to send or customize further
-
-### Getting Started with Cold Outreach
-
-#### 1. Get an Apollo.io API Key
-Visit [apollo.io/settings/integrations](https://app.apollo.io/settings/integrations) and copy your API key.
-
-#### 2. Add to .env
-```bash
-APOLLO_API_KEY=your_api_key_here
-```
-
-#### 3. Test It Out
-```bash
-python job_pipeline_full.py --test-cold-outreach
-```
-
-This runs in test mode (dry-run) on a single VC source with a cap of 2 companies. Verify the output looks good.
-
-#### 4. Run Daily
-```bash
-python job_pipeline_full.py --hours 24
-```
-
-A new sheet called "Cold Outreach" will appear in your Excel output with:
-- Company name, contact name, title
-- Email (highlighted if estimated)
-- LinkedIn profile link
-- Company website
-- Email draft preview (click to see full draft in `data/drafts/`)
-- Gmail draft link (if Gmail is configured)
-- Outreach status tracker (update as you send emails)
-
-### Important Notes
-
-- **Email Verification**: Estimated emails are flagged with yellow highlight. Verify before sending.
-- **Deduplication**: Cold Outreach remembers companies it's already processed. Run daily and it only surfaces new companies.
-- **Rate Limits**: Apollo.io free tier allows 50 requests/day. EarlyBird caps to 10 per day to stay safe.
-- **Cold Email Best Practices**: Always personalize based on the company. Use the email draft as a template, not verbatim.
-
----
-
-## Flags & Options
-
-```bash
-# Skip cold outreach entirely
-python job_pipeline_full.py --no-cold-outreach
-
-# Test cold outreach (dry-run, doesn't update dedup DB)
-python job_pipeline_full.py --test-cold-outreach
-
-# Skip email/Gmail setup (useful for CI/CD)
-python job_pipeline_full.py --no-email
-
-# Scrape jobs from last 24 hours only
-python job_pipeline_full.py --hours 24
-
-# Debug mode — print every rejected job with reason
-python job_pipeline_full.py --debug
-
-# Scrape only, skip Claude API and Gmail
-python job_pipeline_full.py --scrape-only
-```
+9. Drafts personalized outreach emails and LinkedIn messages using the Claude API
+10. Sends emails via Gmail API with randomized delays between sends
+11. Outputs a color-coded Excel file with role, company, location, match score, apply link, posting age, and outreach status
 
 ---
 
 ## Stack
 
 - Python 3.10+
-- [JobSpy](https://github.com/cullenwatson/JobSpy) for LinkedIn and Indeed aggregation
+- [JobSpy](https://github.com/cullenwatson/JobSpy) for LinkedIn and Indeed scraping
+- Anthropic Claude API for outreach message drafting
+- Gmail API for automated email sending
 - openpyxl for Excel output
-- BeautifulSoup for ATS and careers page aggregation
+- BeautifulSoup for ATS and careers page scraping
 - Greenhouse and Lever public APIs for direct company job polling
 - python-dotenv for environment variable management
 
@@ -165,14 +77,28 @@ cp .env.example .env
 ```
 
 ```
+ANTHROPIC_API_KEY=        # get from console.anthropic.com
+GMAIL_ADDRESS=            # your Gmail address
 YOUR_NAME=                # your full name
-YOUR_SCHOOL=              # your university (used in contact research)
+YOUR_SCHOOL=              # your university (used in outreach messages)
 YOUR_LINKEDIN=            # linkedin.com/in/yourhandle
 YOUR_PORTFOLIO=           # yoursite.com (optional)
 YOUR_GITHUB=              # github.com/yourusername
+MY_BACKGROUND=            # 1-2 sentence summary of your skills and experience
+EMAIL_DELAY_MIN=180       # minimum seconds between emails (default 3 min)
+EMAIL_DELAY_MAX=300       # maximum seconds between emails (default 5 min)
 ```
 
-### 4. Configure your search
+### 4. Set up Gmail API
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com)
+2. Create a new project
+3. Enable the Gmail API
+4. Go to Credentials and create an OAuth 2.0 Client ID (Desktop App)
+5. Download the credentials JSON and save it as `credentials.json` in the project root
+6. On first run, a browser window will open asking you to authorize access. Complete the flow once and `token.json` will be saved automatically for future runs.
+
+### 5. Configure your search
 
 Open `job_pipeline_full.py` and update the configuration block at the top:
 
@@ -196,7 +122,7 @@ To add companies to the direct ATS watchlist, find the `WATCHLIST` dictionary an
 "company-lever-slug": "lever",
 ```
 
-### 5. Run it
+### 6. Run it
 
 ```bash
 python job_pipeline_full.py
@@ -206,6 +132,18 @@ To limit to jobs posted in the last 24 hours:
 
 ```bash
 python job_pipeline_full.py --hours 24
+```
+
+To test scraping only without spending API credits:
+
+```bash
+python job_pipeline_full.py --scrape-only
+```
+
+To run without sending emails:
+
+```bash
+python job_pipeline_full.py --no-email
 ```
 
 ---
@@ -257,14 +195,18 @@ Each run generates a timestamped Excel file (e.g. `job_leads_2026-04-14_08-00.xl
 
 - Contact name, title, company, LinkedIn URL
 - Leverage score (alumni ranked highest, then recruiter, then engineer)
+- Drafted email subject and body
+- Drafted LinkedIn message (under 280 characters)
+- Send status
 
 ---
 
 ## Important Notes
 
-- **LinkedIn and Indeed** are aggregated via JobSpy. Aggregating these platforms may violate their terms of service. Use responsibly and do not run more than once per day.
+- **LinkedIn and Indeed** are scraped via JobSpy. Scraping these platforms may violate their terms of service. Use responsibly and do not run more than once per day.
 - **ZipRecruiter** blocks automated access and is excluded from this pipeline.
-- **LinkedIn outreach and email drafting are intentionally manual** -- the tool surfaces who to contact and ranks them by leverage, but writing and sending messages is left to you.
+- **LinkedIn outreach** cannot be automated without risking account restriction. The script drafts LinkedIn messages for you to send manually.
+- **Gmail sending** uses your real Gmail account. Delays are randomized to reduce spam filter risk. Do not lower `EMAIL_DELAY_MIN` below 60 seconds.
 - **Never commit** `.env`, `token.json`, `credentials.json`, or any `*.xlsx` output files. All are included in `.gitignore`.
 
 ---
@@ -296,7 +238,7 @@ logs/
 - [ ] Slack or email digest summarizing each morning's run
 - [ ] Browser extension to one-click add a company to the watchlist
 - [ ] Resume-to-job matching using embeddings instead of keyword overlap
-- [ ] Contact discovery via Crunchbase API for seed-stage companies
+- [ ] Dynamic company sourcing from Crunchbase API based on recent funding rounds
 - [ ] Handshake integration for student-exclusive postings
 
 ---

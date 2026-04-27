@@ -8,7 +8,6 @@ See full docstring in script for setup and usage.
 Run: python job_pipeline_full.py
      python job_pipeline_full.py --no-email
      python job_pipeline_full.py --hours 12
-     python job_pipeline_full.py --hours 72 --cold-outreach
 """
 
 import os
@@ -22,7 +21,6 @@ import argparse
 import warnings
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -30,7 +28,7 @@ from dotenv import load_dotenv
 warnings.filterwarnings("ignore")
 
 # Load environment variables from .env file
-load_dotenv(override=True)
+load_dotenv()
 
 YOUR_NAME      = os.getenv("YOUR_NAME", "")
 YOUR_EMAIL     = os.getenv("YOUR_EMAIL", "")
@@ -41,9 +39,6 @@ YOUR_PORTFOLIO = os.getenv("YOUR_PORTFOLIO", "")
 MY_BACKGROUND  = os.getenv("MY_BACKGROUND", "")
 EMAIL_DELAY_MIN = int(os.getenv("EMAIL_DELAY_MIN", "120"))
 EMAIL_DELAY_MAX = int(os.getenv("EMAIL_DELAY_MAX", "300"))
-
-# Global counter for tool_use blocks across all Claude API calls
-tool_use_block_count = 0
 
 # === Dynamic Company Loading ===
 # Companies are loaded from companies.json (updated weekly via funding_pull.py)
@@ -77,7 +72,7 @@ def load_companies():
     if Path(COMPANIES_CACHE_FILE).exists():
         file_age_seconds = time.time() - Path(COMPANIES_CACHE_FILE).stat().st_mtime
         file_age_days = file_age_seconds / (24 * 3600)
-
+        
         if file_age_days > COMPANIES_CACHE_MAX_AGE_DAYS:
             print(f"  [STALE] companies.json is {file_age_days:.1f} days old (threshold: {COMPANIES_CACHE_MAX_AGE_DAYS} days)")
             print(f"  [REFRESH] Running funding_pull.py to refresh company list...")
@@ -95,7 +90,7 @@ def load_companies():
                     print(f"  [WARNING] funding_pull.py failed, using cached list")
             except Exception as e:
                 print(f"  [WARNING] Could not run funding_pull.py: {e}")
-
+    
     # Load from cache file if it exists
     if Path(COMPANIES_CACHE_FILE).exists():
         try:
@@ -107,7 +102,7 @@ def load_companies():
                     return companies
         except Exception as e:
             print(f"  [WARNING] Could not read companies.json: {e}")
-
+    
     # Fall back to hardcoded list
     print(f"  [FALLBACK] Using fallback list ({len(FALLBACK_COMPANIES)} companies)")
     return FALLBACK_COMPANIES
@@ -123,23 +118,6 @@ ASHBY_SLUGS = []  # No Ashby companies in this setup yet
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
-
-def extract_domain(url):
-    """Extract base domain from a URL, stripping job-board subdomains."""
-    if not url:
-        return ""
-    try:
-        if not url.startswith("http"):
-            url = "https://" + url
-        hostname = urlparse(url).hostname or ""
-        parts = hostname.split(".")
-        # Strip known ATS/job-board subdomains (and www.)
-        strip_prefixes = {"www", "careers", "jobs", "boards", "apply", "recruiting", "hire", "work", "job"}
-        while len(parts) > 2 and parts[0] in strip_prefixes:
-            parts = parts[1:]
-        return ".".join(parts)
-    except Exception:
-        return ""
 
 def hours_ago(dt):
     """Calculate hours elapsed since datetime dt. Returns 999 if dt is None."""
@@ -178,19 +156,19 @@ def score(title, desc=""):
         return 0
     text = (title + " " + desc).lower()
     score_val = 0
-
+    
     # High-value keywords (25 points each)
     high_value = ["rag", "llm", "ai ", "ml ", "machine learning", "genai", "data engineer", "analytics"]
     score_val += sum(25 for keyword in high_value if keyword in text)
-
+    
     # Medium-value keywords (15 points each)
     medium_value = ["backend", "fullstack", "frontend", "react", "python", "java", "c++", "go"]
     score_val += sum(15 for keyword in medium_value if keyword in text)
-
+    
     # Low-value keywords (5 points each)
     low_value = ["remote", "flexible", "hybrid", "relocation", "visa"]
     score_val += sum(5 for keyword in low_value if keyword in text)
-
+    
     return min(score_val, 100)  # Cap at 100
 
 def job(title,company,location,url,dt,source,desc=""):
@@ -210,12 +188,12 @@ def scrape_greenhouse(max_h):
                 continue
             if r.status_code != 200:
                 continue
-
+            
             for j in r.json().get("jobs", []):
                 title = j.get("title", "")
                 if not is_intern(title):
                     continue
-
+                
                 # Parse timestamp from updated_at or created_at
                 dt = None
                 for ts_field in ["updated_at", "created_at"]:
@@ -227,20 +205,20 @@ def scrape_greenhouse(max_h):
                         except Exception as e:
                             print(f"WARNING: [Greenhouse:{token}] timestamp parse error: {e}")
                             continue
-
+                
                 # Default to 72h ago if no timestamp found
                 if dt is None:
                     dt = datetime.now(timezone.utc) - timedelta(hours=72)
-
+                
                 if hours_ago(dt) > max_h:
                     continue
-
+                
                 location = j.get("location", {})
                 if isinstance(location, dict):
                     loc_name = location.get("name", "")
                 else:
                     loc_name = str(location)
-
+                
                 out.append(job(
                     title,
                     token.replace("-", " ").title(),
@@ -266,12 +244,12 @@ def scrape_lever(max_h):
                 continue
             if r.status_code != 200:
                 continue
-
+            
             for j in r.json():
                 title = j.get("text", "")
                 if not is_intern(title):
                     continue
-
+                
                 # Parse createdAt Unix timestamp (in milliseconds)
                 dt = None
                 created_ms = j.get("createdAt", 0)
@@ -280,14 +258,14 @@ def scrape_lever(max_h):
                         dt = datetime.fromtimestamp(created_ms / 1000.0, tz=timezone.utc)
                     except Exception as e:
                         print(f"WARNING: [Lever:{slug}] timestamp parse error: {e}")
-
+                
                 # Default to 72h ago if no timestamp found
                 if dt is None:
                     dt = datetime.now(timezone.utc) - timedelta(hours=72)
-
+                
                 if hours_ago(dt) > max_h:
                     continue
-
+                
                 location = j.get("categories", {}).get("location", "")
                 out.append(job(
                     title,
@@ -387,25 +365,25 @@ def scrape_jobspy(max_h):
                         t = str(row.get("title", ""))
                         if not is_intern(t):
                             continue
-
+                        
                         # Convert date_posted to UTC datetime
                         dt = row.get("date_posted")
                         if hasattr(dt, "to_pydatetime"):
                             dt = dt.to_pydatetime()
-
+                        
                         # Ensure UTC timezone
                         if dt and isinstance(dt, datetime):
                             if dt.tzinfo is None:
                                 # Assume UTC if no timezone info
                                 dt = dt.replace(tzinfo=timezone.utc)
-
+                        
                         # Default to 72h ago if no timestamp
                         if dt is None:
                             dt = datetime.now(timezone.utc) - timedelta(hours=72)
-
+                        
                         if hours_ago(dt) > max_h:
                             continue
-
+                        
                         out.append(job(
                             t,
                             str(row.get("company", "")),
@@ -421,50 +399,14 @@ def scrape_jobspy(max_h):
         print("  [jobspy] skipped — run: pip install python-jobspy")
     return out
 
-def find_contacts(company, role, client):
-    """
-    Find LinkedIn contacts at a company for internship outreach.
-    Uses Claude with web search to return real, currently-found contacts.
-    """
-    global tool_use_block_count
+def find_contacts(company,role,client):
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1000,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Search LinkedIn and the web right now for the current campus recruiter "
-                    f"or university recruiting contact at {company}. Also search for their email address. "
-                    f"Return only real people you actually find via web search. "
-                    f"Return JSON array only:\n"
-                    f"[{{\"name\": \"\", \"title\": \"\", \"reason\": \"\", \"linkedin_url\": \"\", \"email\": \"\"}}]"
-                )
-            }]
-        )
-
-        # Count tool_use / server_tool_use blocks (proves web search was invoked)
-        for block in response.content:
-            if hasattr(block, "type") and block.type in ("tool_use", "server_tool_use"):
-                tool_use_block_count += 1
-
-        # Concatenate all text blocks
-        result_text = ""
-        for block in response.content:
-            if hasattr(block, "type") and block.type == "text":
-                result_text += block.text
-
-        clean = re.sub(r"```json|```", "", result_text).strip()
-        # Find JSON array in the response
-        match = re.search(r"\[.*\]", clean, re.DOTALL)
-        if match:
-            return json.loads(match.group())
-        # Maybe Claude returned a single object instead of array
-        match = re.search(r"\{.*\}", clean, re.DOTALL)
-        if match:
-            return [json.loads(match.group())]
-        return []
+        r=client.messages.create(model="claude-sonnet-4-20250514",max_tokens=700,
+            messages=[{"role":"user","content":f"""Find 3 best LinkedIn contacts at "{company}" for "{role}" internship.
+Priority: {os.getenv("YOUR_SCHOOL", "my university")} alumni > recruiters/TA > junior/mid engineers.
+Return JSON array only:
+[{{"name":null,"title":"","reason":"","linkedin_search_url":"https://linkedin.com/search/results/people/?keywords=...","guessed_email":null}}]"""}])
+        return json.loads(re.sub(r'```json|```','',r.content[0].text).strip())
     except Exception as e:
         print(f"WARNING: [find_contacts:{company}] {e}")
         return []
@@ -494,7 +436,10 @@ def get_gmail():
         from google_auth_oauthlib.flow import InstalledAppFlow
         from google.auth.transport.requests import Request
         from googleapiclient.discovery import build
-        SCOPES=["https://www.googleapis.com/auth/gmail.send"]
+        # gmail.compose covers both send and draft creation (superset of gmail.send).
+        # If your existing token.json only has gmail.send, delete it and re-run once
+        # to re-authorize with the broader scope.
+        SCOPES=["https://www.googleapis.com/auth/gmail.compose"]
         creds=None
         if Path("token.json").exists():
             creds=Credentials.from_authorized_user_file("token.json",SCOPES)
@@ -529,18 +474,17 @@ def send_email(gmail,to,subject,body,dry_run=False):
         print(f"    Email failed: {e}")
         return False
 
-def write_excel(jobs, outreach, cold_outreach_data=None):
+def write_excel(jobs,outreach):
     from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.styles import Font,PatternFill,Alignment
     from openpyxl.utils import get_column_letter
 
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    fname = f"job_leads_{ts}.xlsx"
-    wb = Workbook()
-    hfill = PatternFill("solid", fgColor="0F2940")
-    link_font = Font(name="Arial", color="0563C1", underline="single", size=9)
+    ts=datetime.now().strftime("%Y-%m-%d_%H-%M")
+    fname=f"job_leads_{ts}.xlsx"
+    wb=Workbook()
+    hfill=PatternFill("solid",fgColor="0F2940")
 
-    # ── Jobs sheet ──────────────────────────────────────────────────────────
+    # Jobs sheet
     ws = wb.active
     ws.title = "Jobs — Apply Here"
     hdrs = [
@@ -549,7 +493,7 @@ def write_excel(jobs, outreach, cold_outreach_data=None):
     ]
     ws.append(hdrs)
     for c in ws[1]:
-        c.font = Font(name="Arial", bold=True, color="FFFFFF", size=9)
+        c.font=Font(name="Arial",bold=True,color="FFFFFF",size=9)
         c.fill = hfill
         c.alignment = Alignment(horizontal="center")
 
@@ -558,17 +502,17 @@ def write_excel(jobs, outreach, cold_outreach_data=None):
         posted = f"{ha:.0f}h ago" if ha < 999 else "Unknown"
         ws.append([
             i,
-            j["title"],
+            j["title"],  # Role column
             j["company"],
             j["location"],
             j["source"],
             posted,
             j["job_url"],
             score(j["title"], j.get("description", "")),
-            "",             # Applied?
-            "",             # Date Applied
+            "",  # Applied?
+            "",  # Date Applied
             "Not Applied",  # Status
-            ""              # Notes
+            ""   # Notes
         ])
         color = (
             "D5F5E3" if ha <= 6 else
@@ -580,145 +524,106 @@ def write_excel(jobs, outreach, cold_outreach_data=None):
 
     for i, w in enumerate([4, 35, 22, 18, 12, 14, 50, 12, 18, 14, 14, 20], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
-    ws.freeze_panes = "A2"
+    ws.freeze_panes="A2"
 
-    # ── Outreach sheet ───────────────────────────────────────────────────────
-    ws2 = wb.create_sheet("Outreach — Do This")
-    hdrs2 = [
-        "Company", "Role", "Contact Name", "Contact Title", "Why Reach Out",
-        "LinkedIn URL", "LinkedIn Message (copy+send manually)",
-        "Email Address",
-        "Company Domain", "Apollo Lookup", "Email Pattern",
-        "Email Subject", "Email Body Preview", "Email Sent?", "LinkedIn Sent?"
-    ]
+    # Outreach sheet
+    ws2=wb.create_sheet("Outreach — Do This")
+    hdrs2=["Company","Role","Contact Name","Contact Title","Why Reach Out",
+           "LinkedIn Search URL","LinkedIn Message (copy+send manually)",
+           "Email Address","Email Subject","Email Body Preview","Email Sent?","LinkedIn Sent?"]
     ws2.append(hdrs2)
-    for c in ws2[1]:
+    for c in ws[1]:
         c.font = Font(name="Arial", bold=True, color="FFFFFF", size=9)
         c.fill = hfill
         c.alignment = Alignment(horizontal="center")
+    for row in outreach:
+        ws2.append([row.get("company",""),row.get("role",""),
+                    row.get("name",""),row.get("title",""),row.get("reason",""),
+                    row.get("linkedin_url",""),row.get("linkedin_msg",""),
+                    row.get("email",""),row.get("email_subj",""),
+                    row.get("email_body","")[:250]+"...",
+                    row.get("email_sent",""),
+                    "SEND MANUALLY via LinkedIn"])
+    for i,w in enumerate([22,30,20,22,28,50,55,28,35,45,14,25],1):
+        ws2.column_dimensions[get_column_letter(i)].width=w
+    ws2.freeze_panes="A2"
 
-    for row_idx, row in enumerate(outreach, 2):
-        job_url = row.get("job_url", "")
-        domain = extract_domain(job_url)
-        apollo_url = f"https://app.apollo.io/#/people?q_organization_domains[]={domain}" if domain else ""
-
-        ws2.append([
-            row.get("company", ""),
-            row.get("role", ""),
-            row.get("name", ""),
-            row.get("title", ""),
-            row.get("reason", ""),
-            row.get("linkedin_url", ""),
-            row.get("linkedin_msg", ""),
-            row.get("email", ""),
-            domain,
-            "Open Apollo" if apollo_url else "",
-            "",  # Email Pattern — manual entry
-            row.get("email_subj", ""),
-            (row.get("email_body", "")[:250] + "...") if row.get("email_body") else "",
-            row.get("email_sent", ""),
-            "SEND MANUALLY via LinkedIn"
-        ])
-        # Apply hyperlink to Apollo Lookup cell (column 10)
-        if apollo_url:
-            cell = ws2.cell(row=row_idx, column=10)
-            cell.hyperlink = apollo_url
-            cell.font = link_font
-
-    col_widths2 = [22, 30, 20, 22, 28, 50, 55, 28, 20, 16, 16, 35, 45, 14, 25]
-    for i, w in enumerate(col_widths2, 1):
-        ws2.column_dimensions[get_column_letter(i)].width = w
-    ws2.freeze_panes = "A2"
-
-    # ── Cold Outreach sheet (optional) ───────────────────────────────────────
-    if cold_outreach_data:
-        ws3 = wb.create_sheet("Cold Outreach")
-        hdrs3 = [
-            "Site", "Company", "Contact Name", "Title", "LinkedIn URL",
-            "Contact Date", "Email",
-            "Company Domain", "Apollo Lookup", "Email Pattern"
-        ]
-        ws3.append(hdrs3)
-        for c in ws3[1]:
-            c.font = Font(name="Arial", bold=True, color="FFFFFF", size=9)
-            c.fill = hfill
-            c.alignment = Alignment(horizontal="center")
-
-        for row_idx, row in enumerate(cold_outreach_data, 2):
-            site = row.get("site", "")
-            domain = extract_domain(site) if site else extract_domain(row.get("company_website", ""))
-            apollo_url = f"https://app.apollo.io/#/people?q_organization_domains[]={domain}" if domain else ""
-
-            ws3.append([
-                site,
-                row.get("company", ""),
-                row.get("contact_name", ""),
-                row.get("title", ""),
-                row.get("linkedin_url", ""),
-                row.get("contact_date", ""),
-                row.get("email", ""),
-                domain,
-                "Open Apollo" if apollo_url else "",
-                "",  # Email Pattern — manual entry
-            ])
-            if apollo_url:
-                cell = ws3.cell(row=row_idx, column=9)
-                cell.hyperlink = apollo_url
-                cell.font = link_font
-
-        col_widths3 = [35, 22, 22, 22, 50, 14, 28, 20, 16, 16]
-        for i, w in enumerate(col_widths3, 1):
-            ws3.column_dimensions[get_column_letter(i)].width = w
-        ws3.freeze_panes = "A2"
-
-    # ── Legend sheet ─────────────────────────────────────────────────────────
-    ws_legend = wb.create_sheet("Legend & Setup")
-    for legend_row in [
-        ["COLOR KEY", ""],
-        ["Green", "Posted < 6 hours — apply IMMEDIATELY, you may be in first 10"],
-        ["Blue", "Posted < 24 hours — apply today"],
-        ["Yellow", "Posted < 48 hours — apply this week"],
-        ["White", "Posted > 48 hours — still worth applying"],
+    # Legend
+    ws3=wb.create_sheet("Legend & Setup")
+    for row in [
+        ["COLOR KEY",""],
+        ["Green","Posted < 6 hours — apply IMMEDIATELY, you may be in first 10"],
+        ["Blue","Posted < 24 hours — apply today"],
+        ["Yellow","Posted < 48 hours — apply this week"],
+        ["White","Posted > 48 hours — still worth applying"],
         [""],
-        ["OUTREACH INSTRUCTIONS", ""],
-        ["LinkedIn messages", "Copy from Outreach tab → open LinkedIn search URL → send. Takes 30 sec each."],
-        ["Emails", "Sent automatically to guessed addresses. Check your Sent folder."],
-        ["Apollo Lookup", "Click the 'Open Apollo' link to search company contacts by domain."],
-        ["Email Pattern", "Fill in manually after finding via Apollo (e.g. first.last@company.com)."],
+        ["OUTREACH INSTRUCTIONS",""],
+        ["LinkedIn messages","Copy from Outreach tab → open LinkedIn search URL → send. Takes 30 sec each."],
+        ["Emails","Sent automatically to guessed addresses. Check your Sent folder."],
         [""],
-        ["SETUP", ""],
-        ["1. Install", "pip install python-jobspy pandas openpyxl anthropic requests beautifulsoup4"],
-        ["   Gmail", "pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client"],
-        ["2. API key", "export ANTHROPIC_API_KEY='sk-...'"],
-        ["3. Gmail", "Get credentials.json from Google Cloud Console (enable Gmail API, OAuth Desktop)"],
-        ["4. Run", "python job_pipeline_full.py"],
-        ["   Dry run", "python job_pipeline_full.py --no-email"],
-        ["   Fresh only", "python job_pipeline_full.py --hours 12"],
-        ["   Cold outreach", "python job_pipeline_full.py --hours 72 --cold-outreach"],
-        ["   Cold outreach (custom limit)", "python job_pipeline_full.py --hours 72 --cold-outreach --cold-outreach-limit 10"],
+        ["SETUP",""],
+        ["1. Install","pip install python-jobspy pandas openpyxl anthropic requests beautifulsoup4"],
+        ["   Gmail","pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client"],
+        ["2. API key","export ANTHROPIC_API_KEY='sk-...'"],
+        ["3. Gmail","Get credentials.json from Google Cloud Console (enable Gmail API, OAuth Desktop)"],
+        ["4. Run","python job_pipeline_full.py"],
+        ["   Dry run","python job_pipeline_full.py --no-email"],
+        ["   Fresh only","python job_pipeline_full.py --hours 12"],
     ]:
-        ws_legend.append(legend_row)
-    ws_legend.column_dimensions["A"].width = 20
-    ws_legend.column_dimensions["B"].width = 80
+        ws3.append(row)
+    ws3.column_dimensions["A"].width=20
+    ws3.column_dimensions["B"].width=80
 
-    wb.save(fname)
-    return fname
+    # NOTE: caller is responsible for wb.save(fname) so that the Cold Outreach
+    # module can append its sheet before the file is written to disk.
+    return fname, wb
 
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--no-email", action="store_true")
-    p.add_argument("--hours", type=int, default=72)
-    p.add_argument("--limit", type=int, default=None)
-    p.add_argument("--scrape-only", action="store_true",
+    p=argparse.ArgumentParser()
+    p.add_argument("--no-email",action="store_true")
+    p.add_argument("--hours",type=int,default=72)
+    p.add_argument("--limit",type=int,default=None)
+    p.add_argument("--scrape-only",action="store_true",
                    help="Run scrapers and write Excel only — skip all Claude API and Gmail calls")
-    p.add_argument("--cold-outreach", action="store_true",
-                   help="Also run cold outreach contact research and add a Cold Outreach tab")
-    p.add_argument("--cold-outreach-limit", type=int, default=5,
-                   help="Limit cold outreach research to this many companies (default: 5)")
-    args = p.parse_args()
+    p.add_argument("--test-cold-outreach",action="store_true",
+                   help="Dry-run the Cold Outreach module: scrapes Robin Hood only, "
+                        "processes 2 companies, writes to 'Cold Outreach TEST' sheet, "
+                        "does NOT update seen_companies.json")
+    args=p.parse_args()
+
+    # ----------------------------------------------------------------
+    # --test-cold-outreach: standalone dry-run, exits after completion
+    # ----------------------------------------------------------------
+    if args.test_cold_outreach:
+        from openpyxl import Workbook as _WB
+        from cold_outreach import run_cold_outreach, build_config as _co_cfg
+        print("\n" + "="*60)
+        print("  Cold Outreach — TEST RUN")
+        print("="*60)
+        test_wb = _WB()
+        co_config = _co_cfg()
+        contacts = run_cold_outreach(
+            test_wb, co_config,
+            gmail_service=None,
+            test_mode=True,
+            test_source_limit=1,
+            test_company_limit=2,
+        )
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        test_fname = f"test_cold_outreach_{ts}.xlsx"
+        test_wb.save(test_fname)
+        print("\n" + "="*60)
+        print(f"  TEST COMPLETE — {len(contacts)} contact(s) found")
+        for c in contacts:
+            print(f"  • {c.get('company_name','')} | {c.get('first_name','')} {c.get('last_name','')} "
+                  f"| {c.get('email','(no email)')} | {c.get('email_status','')}")
+        print(f"  Output: {test_fname}")
+        print("  seen_companies.json was NOT modified (dry run)")
+        print("="*60 + "\n")
+        sys.exit(0)
 
     if not args.scrape_only:
-        api_key = os.getenv("ANTHROPIC_API_KEY")
+        api_key=os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             print("Set ANTHROPIC_API_KEY in .env file or:\n  export ANTHROPIC_API_KEY='sk-...'")
             sys.exit(1)
@@ -728,12 +633,12 @@ def main():
                 print(f"WARNING: {var} is not set in .env — outreach messages may be incomplete")
 
         import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
+        client=anthropic.Anthropic(api_key=api_key)
     else:
-        client = None
-        api_key = None
+        client=None
+        api_key=None
 
-    gmail = get_gmail() if (not args.no_email and not args.scrape_only) else None
+    gmail=get_gmail() if (not args.no_email and not args.scrape_only) else None
 
     print(f"\n{'='*60}")
     print(f"  Job Pipeline — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -742,7 +647,7 @@ def main():
 
     all_jobs = []
     source_stats = {}  # Track raw vs filtered for each source
-
+    
     for label, fn, kw in [
         ("Greenhouse ATS (startups/tech)", scrape_greenhouse, {"max_h": args.hours}),
         ("Lever ATS", scrape_lever, {"max_h": args.hours}),
@@ -765,36 +670,44 @@ def main():
         if not loc or not isinstance(loc, str):
             return False
         location_str = loc.lower()
+        # Remove jobs with obvious non-US cities/countries
         non_us_keywords = [
             "dublin", "luxembourg", "bengaluru", "são paulo", "warsaw", "toronto", "canada", "india", "brazil", "ireland", "germany", "uk", "united kingdom", "france", "europe", "singapore", "australia", "china", "japan", "hong kong", "mexico", "spain", "netherlands", "sweden", "switzerland", "italy", "israel", "uae", "dubai", "new zealand", "south africa", "argentina", "chile", "colombia", "peru", "denmark", "norway", "finland", "belgium", "austria", "czech", "poland", "russia", "turkey", "egypt", "saudi", "korea", "taiwan", "malaysia", "thailand", "philippines", "indonesia", "vietnam", "romania", "portugal", "greece", "ukraine", "hungary", "slovakia", "slovenia", "croatia", "serbia", "bulgaria", "latvia", "lithuania", "estonia", "africa", "asia", "south america", "middle east"
         ]
         if any(x in location_str for x in non_us_keywords):
             return False
+        # Keep if PA city or 'PA' in location
         if any(city in location_str for city in PA_CITIES) or re.search(r',?\s*pa(\s|$|,)', location_str):
             return True
+        # Keep if Remote or United States (with no specific city)
         if re.fullmatch(r'\s*remote\s*', location_str) or re.fullmatch(r'\s*united states\s*', location_str):
             return True
+        # If location is just 'Remote' or 'United States' (with no city), keep
         if location_str.strip() in ["remote", "united states"]:
             return True
+        # If location contains 'remote' and no non-US city, keep
         if "remote" in location_str and not any(x in location_str for x in non_us_keywords):
             return True
+        # If location contains 'usa' or 'us' and no non-US city, keep
         if re.search(r'\busa\b|\bunited states\b|\bus\b', location_str) and not any(x in location_str for x in non_us_keywords):
             return True
         return False
 
     all_jobs = [j for j in all_jobs if is_intern(j["title"]) and is_usa_location(j.get("location", ""))]
-
-    # Deduplication: use compound key (company + title)
+    
+    # Deduplication: use compound key (company + title) to avoid duplicate roles at same company from different sources
     seen = set()
     deduped = []
     for j in all_jobs:
+        # Create compound key: company name + role title (case-insensitive)
         company = j["company"].lower().strip()
         title = j["title"].lower().strip()
         dedup_key = (company, title)
+        
         if dedup_key not in seen:
             seen.add(dedup_key)
             deduped.append(j)
-
+    
     all_jobs = sorted(deduped, key=lambda x: x.get("hours_ago", 999))
 
     # Count filtered jobs by source
@@ -817,10 +730,10 @@ def main():
     fresh = sum(1 for j in all_jobs if j.get("hours_ago", 999) <= 24)
     print(f"\nTotal: {len(all_jobs)} unique internships | {fresh} posted in last 24h\n")
 
-    # Filter for outreach: only jobs posted within 96 hours (4 days)
+    # Filter for outreach: only jobs posted within 96 hours (4 days) — gives more time for contact research
     FRESHNESS_CUTOFF_H = 96
     fresh_jobs = [j for j in all_jobs if j.get("hours_ago", 999) <= FRESHNESS_CUTOFF_H]
-    print(f"Jobs passing freshness check (<={FRESHNESS_CUTOFF_H}h): {len(fresh_jobs)}/{len(all_jobs)}\n")
+    print(f"Jobs passing freshness check (≤{FRESHNESS_CUTOFF_H}h): {len(fresh_jobs)}/{len(all_jobs)}\n")
 
     outreach = []
     if args.scrape_only:
@@ -837,7 +750,7 @@ def main():
             contacts = find_contacts(co, role, client)
             for c in contacts[:2]:
                 msgs = draft_messages(co, role, url, c, client)
-                email = c.get("email", "") or c.get("guessed_email", "")
+                email = c.get("guessed_email", "")
                 sent = ""
                 if email and not args.no_email:
                     delay = random.randint(EMAIL_DELAY_MIN, EMAIL_DELAY_MAX)
@@ -852,11 +765,10 @@ def main():
                 outreach.append({
                     "company": co,
                     "role": role,
-                    "job_url": url,
                     "name": c.get("name", ""),
                     "title": c.get("title", ""),
                     "reason": c.get("reason", ""),
-                    "linkedin_url": c.get("linkedin_url", "") or c.get("linkedin_search_url", ""),
+                    "linkedin_url": c.get("linkedin_search_url", ""),
                     "linkedin_msg": msgs.get("linkedin_message", ""),
                     "email": email,
                     "email_subj": msgs.get("email_subject", ""),
@@ -864,36 +776,36 @@ def main():
                     "email_sent": sent
                 })
 
-    # ── Cold Outreach ─────────────────────────────────────────────────────────
-    cold_outreach_data = []
-    if args.cold_outreach and not args.scrape_only:
-        from cold_outreach import run_cold_outreach
-        import cold_outreach as _co_module
-        cold_outreach_data = run_cold_outreach(COMPANIES[:25], client, max_companies=args.cold_outreach_limit)
-        # Sync the tool_use block counter from the cold_outreach module
-        global tool_use_block_count
-        tool_use_block_count += _co_module.tool_use_block_count
-    elif args.cold_outreach and args.scrape_only:
-        print("--scrape-only active: skipping cold outreach\n")
+    fname, wb = write_excel(all_jobs, outreach)
 
-    fname = write_excel(all_jobs, outreach, cold_outreach_data if cold_outreach_data else None)
+    # ----------------------------------------------------------------
+    # Cold Outreach module — runs after job scraping, adds its own tab
+    # ----------------------------------------------------------------
+    cold_contacts = []
+    if not args.scrape_only:
+        try:
+            from cold_outreach import run_cold_outreach, build_config as _co_cfg
+            co_config = _co_cfg()
+            if co_config.get("cold_outreach_enabled", True):
+                cold_contacts = run_cold_outreach(wb, co_config, gmail_service=gmail)
+            else:
+                print("[Cold Outreach] Disabled via COLD_OUTREACH_ENABLED=false")
+        except Exception as e:
+            print(f"WARNING: [Cold Outreach] Module error (main pipeline unaffected): {e}")
+
+    # Save workbook (cold outreach sheet already appended above)
+    wb.save(fname)
 
     print("\n" + "=" * 60)
     print("  COMPLETE")
     print(f"  {len(all_jobs)} jobs | {fresh} fresh | {len(outreach)} outreach drafted")
-    if cold_outreach_data:
-        print(f"  {len(cold_outreach_data)} cold outreach contacts researched")
+    if cold_contacts:
+        print(f"  Cold Outreach: {len(cold_contacts)} new contacts added")
     print(f"  File: {fname}")
-    print(f"\n  Tool-use blocks in Claude API responses: {tool_use_block_count}")
-    if tool_use_block_count == 0:
-        print("  WARNING: 0 tool_use blocks — web search tool may not be invoking correctly")
-    else:
-        print(f"  OK: web search tool was invoked {tool_use_block_count} time(s)")
     print("\n  NEXT STEPS:")
     print("  1. Open file — start with GREEN rows (< 6h old)")
     print("  2. Go to Outreach tab — send LinkedIn messages (30 sec each)")
-    print("  3. Click Apollo Lookup links to find email patterns")
-    print("  4. Run tomorrow morning: python job_pipeline_full.py --hours 24")
+    print("  3. Run tomorrow morning: python job_pipeline_full.py --hours 24")
     print("=" * 60 + "\n")
 
 if __name__=="__main__":

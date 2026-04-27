@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>EarlyBird — Job Search Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        brand: { DEFAULT: '#0F2940', light: '#1a3d5c', accent: '#3B82F6' }
+      }
+    }
+  }
+}
+</script>
+<style>
+  body { font-family: 'Inter', system-ui, sans-serif; background: #f8fafc; }
+  .tab-active { border-bottom: 2px solid #3B82F6; color: #3B82F6; font-weight: 600; }
+  .badge-green { background:#d1fae5; color:#065f46; }
+  .badge-blue  { background:#dbeafe; color:#1e40af; }
+  .badge-yellow{ background:#fef3c7; color:#92400e; }
+  .badge-gray  { background:#f1f5f9; color:#475569; }
+  .row-green { background: #f0fdf4; }
+  .row-blue  { background: #eff6ff; }
+  .row-yellow{ background: #fffbeb; }
+  .score-high { color: #16a34a; font-weight: 700; }
+  .score-mid  { color: #d97706; font-weight: 700; }
+  .score-low  { color: #6b7280; }
+  .sidebar-item { padding: 8px 16px; border-radius: 8px; cursor: pointer; display:flex; align-items:center; gap:10px; color:#94a3b8; font-size:14px; }
+  .sidebar-item:hover { background:#1a3d5c; color:#fff; }
+  .sidebar-item.active { background:#3B82F6; color:#fff; font-weight:600; }
+  .stat-card { background:white; border-radius:12px; padding:20px; box-shadow:0 1px 3px rgba(0,0,0,0.08); }
+  .progress-bar { height:6px; border-radius:3px; background:#e2e8f0; }
+  .progress-fill { height:100%; border-radius:3px; background:#3B82F6; }
+  .chip { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; }
+  .tooltip { position:relative; }
+  .tooltip:hover::after { content: attr(data-tip); position:absolute; bottom:100%; left:50%; transform:translateX(-50%); background:#1e293b; color:white; padding:4px 8px; border-radius:4px; font-size:11px; white-space:nowrap; pointer-events:none; z-index:10; }
+  ::-webkit-scrollbar { width:5px; height:5px; }
+  ::-webkit-scrollbar-track { background:#f1f5f9; }
+  ::-webkit-scrollbar-thumb { background:#cbd5e1; border-radius:3px; }
+</style>
+</head>
+<body class="flex h-screen overflow-hidden">
+
+<!-- Sidebar -->
+<aside class="w-56 flex-shrink-0 flex flex-col" style="background:#0F2940;">
+  <div class="px-5 py-5 border-b border-white/10">
+    <div class="flex items-center gap-2">
+      <span style="font-size:22px;">🐦</span>
+      <span class="text-white font-bold text-lg tracking-tight">EarlyBird</span>
+    </div>
+    <p class="text-blue-300 text-xs mt-0.5">Apply before the crowd</p>
+  </div>
+  <nav class="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+    <div class="sidebar-item active" onclick="showTab('dashboard')">
+      <span>📊</span> Dashboard
+    </div>
+    <div class="sidebar-item" onclick="showTab('jobs')">
+      <span>💼</span> Job Leads
+      <span class="ml-auto bg-blue-500 text-white text-xs rounded-full px-1.5 py-0.5">12</span>
+    </div>
+    <div class="sidebar-item" onclick="showTab('outreach')">
+      <span>✉️</span> Outreach
+    </div>
+    <div class="sidebar-item" onclick="showTab('cold')">
+      <span>🧊</span> Cold Outreach
+    </div>
+    <div class="sidebar-item" onclick="showTab('companies')">
+      <span>🏢</span> Companies
+    </div>
+    <div class="sidebar-item mt-4" onclick="showTab('settings')">
+      <span>⚙️</span> Settings
+    </div>
+  </nav>
+  <div class="px-4 py-4 border-t border-white/10">
+    <button onclick="showRunModal()" class="w-full py-2 rounded-lg text-sm font-semibold flex items-center justify-center gap-2" style="background:#3B82F6;color:white;">
+      ▶ Run Pipeline
+    </button>
+    <p class="text-blue-400 text-xs text-center mt-2">Last run: 2h ago</p>
+  </div>
+</aside>
+
+<!-- Main -->
+<main class="flex-1 flex flex-col overflow-hidden">
+
+  <!-- Top bar -->
+  <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between flex-shrink-0">
+    <div>
+      <h1 id="page-title" class="text-slate-800 font-bold text-lg">Dashboard</h1>
+      <p id="page-sub" class="text-slate-400 text-xs">Sunday, April 26 2026 — 72h window</p>
+    </div>
+    <div class="flex items-center gap-3">
+      <div class="flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-3 py-1.5">
+        <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+        <span class="text-green-700 text-xs font-medium">Web Search Active</span>
+      </div>
+      <div class="flex items-center gap-2 text-slate-500 text-sm bg-slate-100 rounded-lg px-3 py-1.5">
+        <span>🔑</span> API Key Set
+      </div>
+    </div>
+  </header>
+
+  <!-- Content -->
+  <div class="flex-1 overflow-y-auto p-6">
+
+    <!-- DASHBOARD TAB -->
+    <div id="tab-dashboard">
+      <!-- Stats row -->
+      <div class="grid grid-cols-4 gap-4 mb-6">
+        <div class="stat-card">
+          <p class="text-xs text-slate-400 uppercase tracking-wide mb-1">Total Jobs Found</p>
+          <p class="text-3xl font-bold text-slate-800">47</p>
+          <p class="text-xs text-green-600 mt-1">↑ 12 from yesterday</p>
+        </div>
+        <div class="stat-card">
+          <p class="text-xs text-slate-400 uppercase tracking-wide mb-1">Fresh (&lt;6h)</p>
+          <p class="text-3xl font-bold text-green-600">3</p>
+          <p class="text-xs text-slate-400 mt-1">Apply immediately</p>
+        </div>
+        <div class="stat-card">
+          <p class="text-xs text-slate-400 uppercase tracking-wide mb-1">Outreach Drafted</p>
+          <p class="text-3xl font-bold text-blue-600">18</p>
+          <p class="text-xs text-slate-400 mt-1">4 emails sent</p>
+        </div>
+        <div class="stat-card">
+          <p class="text-xs text-slate-400 uppercase tracking-wide mb-1">Cold Contacts</p>
+          <p class="text-3xl font-bold text-purple-600">10</p>
+          <p class="text-xs text-slate-400 mt-1">via web search</p>
+        </div>
+      </div>
+
+      <!-- Two columns -->
+      <div class="grid grid-cols-2 gap-4 mb-4">
+        <!-- Fresh jobs -->
+        <div class="bg-white rounded-xl shadow-sm p-4 border border-slate-100">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="font-semibold text-slate-700 text-sm">🟢 Apply Right Now</h2>
+            <span class="text-xs text-slate-400">Posted &lt; 6h ago</span>
+          </div>
+          <div class="space-y-2">
+            <div class="flex items-start gap-3 p-3 rounded-lg row-green border border-green-100">
+              <div class="flex-1">
+                <p class="font-semibold text-sm text-slate-800">Software Engineering Intern</p>
+                <p class="text-xs text-slate-500">Airbnb · Remote · Greenhouse</p>
+              </div>
+              <div class="text-right">
+                <span class="chip badge-green">2h ago</span>
+                <p class="text-xs mt-1 score-high">Score 85</p>
+              </div>
+            </div>
+            <div class="flex items-start gap-3 p-3 rounded-lg row-green border border-green-100">
+              <div class="flex-1">
+                <p class="font-semibold text-sm text-slate-800">ML Engineering Intern 2026</p>
+                <p class="text-xs text-slate-500">Brex · Remote · Greenhouse</p>
+              </div>
+              <div class="text-right">
+                <span class="chip badge-green">4h ago</span>
+                <p class="text-xs mt-1 score-high">Score 100</p>
+              </div>
+            </div>
+            <div class="flex items-start gap-3 p-3 rounded-lg row-green border border-green-100">
+              <div class="flex-1">
+                <p class="font-semibold text-sm text-slate-800">Backend Engineer Intern</p>
+                <p class="text-xs text-slate-500">Notion · United States · Greenhouse</p>
+              </div>
+              <div class="text-right">
+                <span class="chip badge-green">5h ago</span>
+                <p class="text-xs mt-1 score-high">Score 75</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Outreach pipeline -->
+        <div class="bg-white rounded-xl shadow-sm p-4 border border-slate-100">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="font-semibold text-slate-700 text-sm">✉️ Outreach To-Do</h2>
+            <span class="text-xs text-blue-500 cursor-pointer">View all →</span>
+          </div>
+          <div class="space-y-2">
+            <div class="flex items-center gap-3 p-3 rounded-lg bg-slate-50 border border-slate-100">
+              <div class="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-sm font-bold text-blue-600">CW</div>
+              <div class="flex-1">
+                <p class="text-sm font-medium text-slate-800">Caitlin Wright</p>
+                <p class="text-xs text-slate-400">Recruiter · Airbnb</p>
+              </div>
+              <button class="text-xs bg-blue-500 text-white px-3 py-1 rounded-lg">Send →</button>
+            </div>
+            <div class="flex items-center gap-3 p-3 rounded-lg bg-slate-50 border border-slate-100">
+              <div class="w-8 h-8 rounded-full bg-purple-100 flex items-center justify-center text-sm font-bold text-purple-600">SP</div>
+              <div class="flex-1">
+                <p class="text-sm font-medium text-slate-800">Shivani Patel</p>
+                <p class="text-xs text-slate-400">Campus Recruiter · Notion</p>
+              </div>
+              <button class="text-xs bg-blue-500 text-white px-3 py-1 rounded-lg">Send →</button>
+            </div>
+            <div class="flex items-center gap-3 p-3 rounded-lg bg-slate-50 border border-slate-100">
+              <div class="w-8 h-8 rounded-full bg-green-100 flex items-center justify-center text-sm font-bold text-green-600">MK</div>
+              <div class="flex-1">
+                <p class="text-sm font-medium text-slate-800">Maya Kim</p>
+                <p class="text-xs text-slate-400">University Recruiting · Vercel</p>
+              </div>
+              <button class="text-xs bg-blue-500 text-white px-3 py-1 rounded-lg">Send →</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Source breakdown -->
+      <div class="bg-white rounded-xl shadow-sm p-4 border border-slate-100">
+        <h2 class="font-semibold text-slate-700 text-sm mb-3">📡 Source Breakdown</h2>
+        <div class="space-y-2">
+          <div class="flex items-center gap-3">
+            <span class="text-xs text-slate-500 w-40">Greenhouse ATS</span>
+            <div class="progress-bar flex-1"><div class="progress-fill" style="width:60%;background:#3B82F6"></div></div>
+            <span class="text-xs font-medium text-slate-700 w-8">28</span>
+          </div>
+          <div class="flex items-center gap-3">
+            <span class="text-xs text-slate-500 w-40">LinkedIn / Indeed</span>
+            <div class="progress-bar flex-1"><div class="progress-fill" style="width:30%;background:#8B5CF6"></div></div>
+            <span class="text-xs font-medium text-slate-700 w-8">14</span>
+          </div>
+          <div class="flex items-center gap-3">
+            <span class="text-xs text-slate-500 w-40">Lever ATS</span>
+            <div class="progress-bar flex-1"><div class="progress-fill" style="width:10%;background:#10B981"></div></div>
+            <span class="text-xs font-medium text-slate-700 w-8">5</span>
+          </div>
+          <div class="flex items-center gap-3">
+            <span class="text-xs text-slate-500 w-40">Wellfound</span>
+            <div class="progress-bar flex-1"><div class="progress-fill" style="width:0%;background:#F59E0B"></div></div>
+            <span class="text-xs font-medium text-slate-700 w-8">0</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- JOBS TAB -->
+    <div id="tab-jobs" class="hidden">
+      <div class="flex items-center gap-3 mb-4">
+        <input type="text" placeholder="Search jobs..." class="border border-slate-200 rounded-lg px-3 py-2 text-sm flex-1 outline-none focus:border-blue-400" />
+        <select class="border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none">
+          <option>All Sources</option>
+          <option>Greenhouse</option>
+          <option>Lever</option>
+          <option>LinkedIn</option>
+        </select>
+        <select class="border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none">
+          <option>All Locations</option>
+          <option>Remote</option>
+          <option>Philadelphia, PA</option>
+        </select>
+        <button class="bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium">Filter</button>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm overflow-hidden border border-slate-100">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-slate-100 text-left">
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">#</th>
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Role</th>
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Company</th>
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Location</th>
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Posted</th>
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Score</th>
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Status</th>
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="row-green border-b border-slate-50 hover:bg-green-50 transition-colors">
+              <td class="px-4 py-3 text-slate-400">1</td>
+              <td class="px-4 py-3 font-medium text-slate-800">ML Engineering Intern 2026</td>
+              <td class="px-4 py-3 text-slate-600">Brex</td>
+              <td class="px-4 py-3 text-slate-500">Remote</td>
+              <td class="px-4 py-3"><span class="chip badge-green">2h ago</span></td>
+              <td class="px-4 py-3 score-high">100</td>
+              <td class="px-4 py-3"><span class="chip badge-gray">Not Applied</span></td>
+              <td class="px-4 py-3"><a href="#" class="text-blue-500 text-xs">Apply →</a></td>
+            </tr>
+            <tr class="row-green border-b border-slate-50 hover:bg-green-50 transition-colors">
+              <td class="px-4 py-3 text-slate-400">2</td>
+              <td class="px-4 py-3 font-medium text-slate-800">Software Engineering Intern</td>
+              <td class="px-4 py-3 text-slate-600">Airbnb</td>
+              <td class="px-4 py-3 text-slate-500">Remote</td>
+              <td class="px-4 py-3"><span class="chip badge-green">4h ago</span></td>
+              <td class="px-4 py-3 score-high">85</td>
+              <td class="px-4 py-3"><span class="chip badge-green">Applied ✓</span></td>
+              <td class="px-4 py-3"><a href="#" class="text-blue-500 text-xs">Apply →</a></td>
+            </tr>
+            <tr class="row-blue border-b border-slate-50 hover:bg-blue-50 transition-colors">
+              <td class="px-4 py-3 text-slate-400">3</td>
+              <td class="px-4 py-3 font-medium text-slate-800">Backend Engineer Intern</td>
+              <td class="px-4 py-3 text-slate-600">Notion</td>
+              <td class="px-4 py-3 text-slate-500">United States</td>
+              <td class="px-4 py-3"><span class="chip badge-blue">18h ago</span></td>
+              <td class="px-4 py-3 score-high">75</td>
+              <td class="px-4 py-3"><span class="chip badge-gray">Not Applied</span></td>
+              <td class="px-4 py-3"><a href="#" class="text-blue-500 text-xs">Apply →</a></td>
+            </tr>
+            <tr class="row-blue border-b border-slate-50 hover:bg-blue-50 transition-colors">
+              <td class="px-4 py-3 text-slate-400">4</td>
+              <td class="px-4 py-3 font-medium text-slate-800">Data Engineering Intern</td>
+              <td class="px-4 py-3 text-slate-600">Coinbase</td>
+              <td class="px-4 py-3 text-slate-500">Remote</td>
+              <td class="px-4 py-3"><span class="chip badge-blue">22h ago</span></td>
+              <td class="px-4 py-3 score-high">100</td>
+              <td class="px-4 py-3"><span class="chip badge-gray">Not Applied</span></td>
+              <td class="px-4 py-3"><a href="#" class="text-blue-500 text-xs">Apply →</a></td>
+            </tr>
+            <tr class="row-yellow border-b border-slate-50 hover:bg-yellow-50 transition-colors">
+              <td class="px-4 py-3 text-slate-400">5</td>
+              <td class="px-4 py-3 font-medium text-slate-800">Fullstack Intern 2026</td>
+              <td class="px-4 py-3 text-slate-600">Vercel</td>
+              <td class="px-4 py-3 text-slate-500">Remote</td>
+              <td class="px-4 py-3"><span class="chip badge-yellow">36h ago</span></td>
+              <td class="px-4 py-3 score-mid">45</td>
+              <td class="px-4 py-3"><span class="chip badge-gray">Not Applied</span></td>
+              <td class="px-4 py-3"><a href="#" class="text-blue-500 text-xs">Apply →</a></td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="px-4 py-3 border-t border-slate-100 flex items-center justify-between">
+          <p class="text-xs text-slate-400">Showing 5 of 47 jobs · <span class="text-green-600 font-medium">3 green</span> · <span class="text-blue-600 font-medium">9 blue</span> · <span class="text-yellow-600 font-medium">12 yellow</span></p>
+          <div class="flex gap-2">
+            <button class="px-3 py-1 rounded border border-slate-200 text-xs text-slate-500">← Prev</button>
+            <button class="px-3 py-1 rounded border border-slate-200 text-xs text-slate-500">Next →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- OUTREACH TAB -->
+    <div id="tab-outreach" class="hidden">
+      <div class="grid grid-cols-3 gap-4">
+        <div class="col-span-1 space-y-3">
+          <h2 class="font-semibold text-slate-700 text-sm mb-2">Contacts (18)</h2>
+          <div onclick="selectContact(0)" class="bg-white border-2 border-blue-400 rounded-xl p-4 cursor-pointer shadow-sm">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center font-bold text-blue-600">CW</div>
+              <div>
+                <p class="font-semibold text-sm text-slate-800">Caitlin Wright</p>
+                <p class="text-xs text-slate-400">Recruiter · Airbnb</p>
+              </div>
+              <span class="ml-auto chip badge-green">New</span>
+            </div>
+          </div>
+          <div onclick="selectContact(1)" class="bg-white border border-slate-100 rounded-xl p-4 cursor-pointer shadow-sm hover:border-blue-200 transition-colors">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center font-bold text-purple-600">SP</div>
+              <div>
+                <p class="font-semibold text-sm text-slate-800">Shivani Patel</p>
+                <p class="text-xs text-slate-400">Campus Recruiter · Notion</p>
+              </div>
+              <span class="ml-auto chip badge-blue">Draft</span>
+            </div>
+          </div>
+          <div onclick="selectContact(2)" class="bg-white border border-slate-100 rounded-xl p-4 cursor-pointer shadow-sm hover:border-blue-200 transition-colors">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center font-bold text-green-600">MK</div>
+              <div>
+                <p class="font-semibold text-sm text-slate-800">Maya Kim</p>
+                <p class="text-xs text-slate-400">Univ. Recruiting · Vercel</p>
+              </div>
+              <span class="ml-auto chip" style="background:#fce7f3;color:#9d174d;">Sent</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-span-2 bg-white rounded-xl shadow-sm border border-slate-100 p-5">
+          <div class="flex items-center gap-4 mb-5 pb-4 border-b border-slate-100">
+            <div class="w-14 h-14 rounded-full bg-blue-100 flex items-center justify-center font-bold text-blue-600 text-xl">CW</div>
+            <div class="flex-1">
+              <h2 class="font-bold text-slate-800 text-lg">Caitlin Wright</h2>
+              <p class="text-slate-400 text-sm">Recruiter at Airbnb · Found via web search</p>
+              <div class="flex gap-2 mt-1">
+                <a href="#" class="text-xs text-blue-500 hover:underline">🔗 LinkedIn</a>
+                <span class="text-slate-300">·</span>
+                <span class="text-xs text-slate-400">caitlin.wright@airbnb.com</span>
+                <span class="text-slate-300">·</span>
+                <span class="text-xs text-slate-400">airbnb.com</span>
+                <a href="#" class="text-xs text-purple-500 hover:underline">Apollo →</a>
+              </div>
+            </div>
+            <div class="text-right">
+              <span class="text-xs text-slate-400">Re: ML Engineering Intern</span>
+              <p class="text-xs text-green-600 font-medium mt-0.5">Posted 2h ago</p>
+            </div>
+          </div>
+
+          <div class="mb-4">
+            <p class="text-xs font-semibold text-slate-500 uppercase mb-2">LinkedIn Message <span class="text-slate-400 font-normal normal-case">(280 chars)</span></p>
+            <div class="bg-slate-50 rounded-lg p-3 text-sm text-slate-700 leading-relaxed border border-slate-100">
+              Hi Caitlin! I came across your profile while researching Airbnb. I'm a CS student at Drexel applying for the ML Engineering Intern role — would love to connect and learn more about the team. Happy to share my background!
+            </div>
+            <div class="flex justify-end mt-2">
+              <button class="text-xs bg-blue-500 text-white px-4 py-1.5 rounded-lg font-medium">Copy Message</button>
+            </div>
+          </div>
+
+          <div>
+            <p class="text-xs font-semibold text-slate-500 uppercase mb-2">Email Draft</p>
+            <div class="border border-slate-200 rounded-lg overflow-hidden">
+              <div class="bg-slate-50 px-3 py-2 border-b border-slate-200">
+                <p class="text-xs text-slate-500">To: <span class="text-slate-700">caitlin.wright@airbnb.com</span></p>
+                <p class="text-xs text-slate-500">Subject: <span class="text-slate-700">Drexel CS Student — ML Engineering Intern @ Airbnb</span></p>
+              </div>
+              <div class="p-3 text-sm text-slate-700 leading-relaxed" style="max-height:160px;overflow-y:auto;">
+                Hi Caitlin,<br/><br/>
+                I came across the ML Engineering Intern posting at Airbnb and wanted to reach out directly. I'm a junior CS student at Drexel University with experience in RAG pipelines, LLM fine-tuning, and backend development in Python.<br/><br/>
+                I'd love to learn more about the team and the internship program. Would you have 15 minutes for a quick chat?<br/><br/>
+                Best,<br/>Anishka
+              </div>
+            </div>
+            <div class="flex justify-end gap-2 mt-2">
+              <button class="text-xs border border-slate-200 text-slate-600 px-4 py-1.5 rounded-lg">Edit</button>
+              <button class="text-xs bg-green-500 text-white px-4 py-1.5 rounded-lg font-medium">Send Email ✉️</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- COLD OUTREACH TAB -->
+    <div id="tab-cold" class="hidden">
+      <div class="flex items-center justify-between mb-4">
+        <p class="text-sm text-slate-500">Campus recruiters found via live web search · 10 companies researched</p>
+        <button class="bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2">
+          🔍 Run Cold Search
+        </button>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm overflow-hidden border border-slate-100">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-slate-100 text-left">
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Company</th>
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Contact Name</th>
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Title</th>
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Email</th>
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Domain</th>
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Apollo</th>
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Pattern</th>
+              <th class="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="border-b border-slate-50 hover:bg-slate-50 transition-colors">
+              <td class="px-4 py-3 font-medium text-slate-800">Airbnb</td>
+              <td class="px-4 py-3 text-slate-700 font-medium">Caitlin Wright</td>
+              <td class="px-4 py-3 text-slate-500">Recruiter</td>
+              <td class="px-4 py-3 text-blue-500 text-xs">c.wright@airbnb.com</td>
+              <td class="px-4 py-3 text-slate-400 text-xs">airbnb.com</td>
+              <td class="px-4 py-3"><a href="#" class="text-purple-500 text-xs hover:underline">Open Apollo →</a></td>
+              <td class="px-4 py-3"><input class="border border-slate-200 rounded px-2 py-0.5 text-xs w-32" placeholder="first.last@..." /></td>
+              <td class="px-4 py-3"><button class="text-xs bg-blue-500 text-white px-3 py-1 rounded-lg">Reach Out</button></td>
+            </tr>
+            <tr class="border-b border-slate-50 hover:bg-slate-50 transition-colors">
+              <td class="px-4 py-3 font-medium text-slate-800">Notion</td>
+              <td class="px-4 py-3 text-slate-700 font-medium">Shivani Patel</td>
+              <td class="px-4 py-3 text-slate-500">Campus Recruiter</td>
+              <td class="px-4 py-3 text-blue-500 text-xs">s.patel@notion.so</td>
+              <td class="px-4 py-3 text-slate-400 text-xs">notion.so</td>
+              <td class="px-4 py-3"><a href="#" class="text-purple-500 text-xs hover:underline">Open Apollo →</a></td>
+              <td class="px-4 py-3"><input class="border border-slate-200 rounded px-2 py-0.5 text-xs w-32" placeholder="first.last@..." /></td>
+              <td class="px-4 py-3"><button class="text-xs bg-blue-500 text-white px-3 py-1 rounded-lg">Reach Out</button></td>
+            </tr>
+            <tr class="border-b border-slate-50 hover:bg-slate-50 transition-colors">
+              <td class="px-4 py-3 font-medium text-slate-800">Brex</td>
+              <td class="px-4 py-3 text-slate-400 italic text-xs">—</td>
+              <td class="px-4 py-3 text-slate-400 text-xs">—</td>
+              <td class="px-4 py-3 text-slate-400 text-xs">—</td>
+              <td class="px-4 py-3 text-slate-400 text-xs">brex.com</td>
+              <td class="px-4 py-3"><a href="#" class="text-purple-500 text-xs hover:underline">Open Apollo →</a></td>
+              <td class="px-4 py-3"><input class="border border-slate-200 rounded px-2 py-0.5 text-xs w-32" placeholder="first.last@..." /></td>
+              <td class="px-4 py-3"><button class="text-xs border border-slate-200 text-slate-400 px-3 py-1 rounded-lg">No Contact</button></td>
+            </tr>
+            <tr class="border-b border-slate-50 hover:bg-slate-50 transition-colors">
+              <td class="px-4 py-3 font-medium text-slate-800">Vercel</td>
+              <td class="px-4 py-3 text-slate-700 font-medium">Maya Kim</td>
+              <td class="px-4 py-3 text-slate-500">Univ. Recruiting</td>
+              <td class="px-4 py-3 text-blue-500 text-xs">m.kim@vercel.com</td>
+              <td class="px-4 py-3 text-slate-400 text-xs">vercel.com</td>
+              <td class="px-4 py-3"><a href="#" class="text-purple-500 text-xs hover:underline">Open Apollo →</a></td>
+              <td class="px-4 py-3"><input class="border border-slate-200 rounded px-2 py-0.5 text-xs w-32" placeholder="first.last@..." /></td>
+              <td class="px-4 py-3"><button class="text-xs bg-blue-500 text-white px-3 py-1 rounded-lg">Reach Out</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- SETTINGS TAB -->
+    <div id="tab-settings" class="hidden">
+      <div class="grid grid-cols-2 gap-4 max-w-2xl">
+        <div class="col-span-2 bg-white rounded-xl shadow-sm border border-slate-100 p-5">
+          <h2 class="font-semibold text-slate-700 mb-4">Your Profile</h2>
+          <div class="space-y-3">
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-slate-500 font-medium">Your Name</label>
+                <input class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-400" value="Anishka Kakade" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500 font-medium">Your Email</label>
+                <input class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-400" value="anishka@drexel.edu" />
+              </div>
+            </div>
+            <div>
+              <label class="text-xs text-slate-500 font-medium">School</label>
+              <input class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-400" value="Drexel University" />
+            </div>
+            <div>
+              <label class="text-xs text-slate-500 font-medium">Background (used for outreach drafts)</label>
+              <textarea class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-400 h-20 resize-none" placeholder="CS junior at Drexel, experience in RAG/LLMs, Python..."></textarea>
+            </div>
+          </div>
+        </div>
+        <div class="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
+          <h2 class="font-semibold text-slate-700 mb-4">Pipeline Settings</h2>
+          <div class="space-y-3">
+            <div>
+              <label class="text-xs text-slate-500 font-medium">Hours Window</label>
+              <input type="number" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none" value="72" />
+            </div>
+            <div>
+              <label class="text-xs text-slate-500 font-medium">Cold Outreach Limit</label>
+              <input type="number" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none" value="5" />
+            </div>
+            <div class="flex items-center justify-between">
+              <label class="text-xs text-slate-500 font-medium">Enable Cold Outreach</label>
+              <div class="w-10 h-5 rounded-full bg-blue-500 relative cursor-pointer">
+                <div class="absolute right-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow"></div>
+              </div>
+            </div>
+            <div class="flex items-center justify-between">
+              <label class="text-xs text-slate-500 font-medium">Auto-send Emails</label>
+              <div class="w-10 h-5 rounded-full bg-slate-200 relative cursor-pointer">
+                <div class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
+          <h2 class="font-semibold text-slate-700 mb-4">API Keys</h2>
+          <div class="space-y-3">
+            <div>
+              <label class="text-xs text-slate-500 font-medium">Anthropic API Key</label>
+              <div class="flex gap-2 mt-1">
+                <input type="password" class="flex-1 border border-green-300 bg-green-50 rounded-lg px-3 py-2 text-sm outline-none" value="sk-ant-api03-..." />
+                <span class="text-green-500 text-lg">✓</span>
+              </div>
+            </div>
+            <div>
+              <label class="text-xs text-slate-500 font-medium">Gmail OAuth</label>
+              <div class="flex items-center gap-2 mt-1 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                <span class="text-xs text-slate-400">credentials.json not found</span>
+                <button class="ml-auto text-xs text-blue-500">Connect →</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<!-- Run Modal -->
+<div id="run-modal" class="hidden fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+  <div class="bg-white rounded-2xl shadow-xl p-6 w-96">
+    <h2 class="font-bold text-slate-800 text-lg mb-1">Run Pipeline</h2>
+    <p class="text-slate-400 text-sm mb-4">Configure and launch a new scrape run</p>
+    <div class="space-y-3 mb-5">
+      <div>
+        <label class="text-xs text-slate-500 font-medium">Hours Window</label>
+        <input type="number" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none" value="72" />
+      </div>
+      <div class="flex items-center justify-between bg-slate-50 rounded-lg px-3 py-2">
+        <label class="text-sm text-slate-700">Include Cold Outreach</label>
+        <div class="w-10 h-5 rounded-full bg-blue-500 relative cursor-pointer">
+          <div class="absolute right-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow"></div>
+        </div>
+      </div>
+      <div class="flex items-center justify-between bg-slate-50 rounded-lg px-3 py-2">
+        <label class="text-sm text-slate-700">Send Emails</label>
+        <div class="w-10 h-5 rounded-full bg-slate-200 relative cursor-pointer">
+          <div class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow"></div>
+        </div>
+      </div>
+    </div>
+    <div class="flex gap-3">
+      <button onclick="hideRunModal()" class="flex-1 border border-slate-200 rounded-lg py-2 text-sm text-slate-600">Cancel</button>
+      <button onclick="hideRunModal()" class="flex-1 bg-blue-500 text-white rounded-lg py-2 text-sm font-semibold">▶ Run Now</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function showTab(name) {
+  const tabs = ['dashboard','jobs','outreach','cold','companies','settings'];
+  tabs.forEach(t => {
+    const el = document.getElementById('tab-' + t);
+    if (el) el.classList.add('hidden');
+  });
+  const el = document.getElementById('tab-' + name);
+  if (el) el.classList.remove('hidden');
+
+  document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+  event.currentTarget.classList.add('active');
+
+  const titles = {
+    dashboard: ['Dashboard', 'Sunday, April 26 2026 — 72h window'],
+    jobs: ['Job Leads', '47 internships found · 3 fresh'],
+    outreach: ['Outreach', '18 contacts drafted · 4 emails sent'],
+    cold: ['Cold Outreach', '10 companies researched via web search'],
+    companies: ['Companies', '10 companies loaded from cache'],
+    settings: ['Settings', 'Configure your pipeline'],
+  };
+  document.getElementById('page-title').textContent = titles[name][0];
+  document.getElementById('page-sub').textContent = titles[name][1];
+}
+
+function showRunModal() { document.getElementById('run-modal').classList.remove('hidden'); }
+function hideRunModal() { document.getElementById('run-modal').classList.add('hidden'); }
+
+function selectContact(i) {
+  document.querySelectorAll('#tab-outreach .col-span-1 > div:not(h2)').forEach((el, idx) => {
+    el.classList.toggle('border-blue-400', idx === i);
+    el.classList.toggle('border-2', idx === i);
+    el.classList.toggle('border-slate-100', idx !== i);
+  });
+}
+</script>
+</body>
+</html>

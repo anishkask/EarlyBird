@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python job_pipeline_full.py --hours 72 --cold-outreach)",
+      "Bash(pip install:*)",
+      "Bash(cp /c/Users/anish/Downloads/earlybird/.env /c/Users/anish/Downloads/earlybird/.claude/worktrees/quizzical-beaver/.env)",
+      "Bash(cp /c/Users/anish/Downloads/earlybird/companies.json /c/Users/anish/Downloads/earlybird/.claude/worktrees/quizzical-beaver/companies.json)",
+      "Bash(python -c \"from dotenv import load_dotenv; import os; load_dotenv\\(\\); key=os.getenv\\('ANTHROPIC_API_KEY'\\); print\\(repr\\(key\\)\\)\")",
+      "Bash(python -c ':*)",
+      "Bash(python job_pipeline_full.py --hours 72 --cold-outreach --no-email)",
+      "Bash(gh pr create --title 'Fix web search tool in contact research + Cold Outreach tab + Apollo columns' --body ':*)",
+      "Bash(where gh:*)",
+      "Bash(winget list:*)",
+      "Bash(cmd /c \"where gh\")",
+      "Bash(cmd /c \"gh --version\")",
+      "Read(//c/Users/anish/Downloads/earlybird/**)",
+      "Bash(cp \"C:/Users/anish/Downloads/earlybird/.claude/worktrees/quizzical-beaver/job_pipeline_full.py\" \"C:/Users/anish/Downloads/earlybird/job_pipeline_full.py\")",
+      "Bash(cp \"C:/Users/anish/Downloads/earlybird/.claude/worktrees/quizzical-beaver/cold_outreach.py\" \"C:/Users/anish/Downloads/earlybird/cold_outreach.py\")",
+      "Bash(npm create:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tailwindcss:*)",
+      "mcp__Claude_Preview__preview_start"
+    ]
+  }
+}
