@@ -1,6 +1,1 @@
-{
-  "buildCommand": "cd earlybird-ui && npm install && npm run build",
-  "outputDirectory": "earlybird-ui/dist",
-  "installCommand": "echo skip",
-  "framework": null
-}
+{}
