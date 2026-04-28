@@ -631,12 +631,17 @@ def write_excel(jobs, outreach, cold_outreach_data=None):
     ws2.freeze_panes = "A2"
 
     # ── Cold Outreach sheet (optional) ───────────────────────────────────────
+    # Only contains companies sourced from VC portfolio scrapers.
+    # Never shares rows with the Outreach tab.
     if cold_outreach_data:
+        new_fill = PatternFill("solid", fgColor="FFFDE7")  # light yellow for NEW (2023+) companies
         ws3 = wb.create_sheet("Cold Outreach")
         hdrs3 = [
-            "Site", "Company", "Contact Name", "Title", "LinkedIn URL",
+            "Source", "Company", "Contact Name", "Title", "LinkedIn URL",
             "Contact Date", "Email",
-            "Company Domain", "Apollo Lookup", "Email Pattern"
+            "Company Domain", "Apollo Lookup", "Email Pattern",
+            "Email Subject", "Email Body",
+            "Founded", "NEW?"
         ]
         ws3.append(hdrs3)
         for c in ws3[1]:
@@ -645,28 +650,46 @@ def write_excel(jobs, outreach, cold_outreach_data=None):
             c.alignment = Alignment(horizontal="center")
 
         for row_idx, row in enumerate(cold_outreach_data, 2):
-            site = row.get("site", "")
-            domain = extract_domain(site) if site else extract_domain(row.get("company_website", ""))
+            domain     = row.get("domain", "") or extract_domain(row.get("site", ""))
             apollo_url = f"https://app.apollo.io/#/people?q_organization_domains[]={domain}" if domain else ""
+            linkedin   = row.get("linkedin_url", "")
+            is_new     = row.get("is_new", False)
 
             ws3.append([
-                site,
+                row.get("source", ""),
                 row.get("company", ""),
                 row.get("contact_name", ""),
-                row.get("title", ""),
-                row.get("linkedin_url", ""),
+                row.get("contact_title", ""),
+                linkedin,
                 row.get("contact_date", ""),
                 row.get("email", ""),
                 domain,
                 "Open Apollo" if apollo_url else "",
-                "",  # Email Pattern — manual entry
+                "",   # Email Pattern — fill manually after Apollo lookup
+                row.get("email_subject", ""),
+                row.get("email_body", ""),
+                row.get("founded", ""),
+                "NEW" if is_new else "",
             ])
+
+            # Yellow fill for NEW companies
+            if is_new:
+                for cell in ws3[row_idx]:
+                    cell.fill = new_fill
+
+            # Apollo hyperlink (col 9)
             if apollo_url:
                 cell = ws3.cell(row=row_idx, column=9)
                 cell.hyperlink = apollo_url
                 cell.font = link_font
 
-        col_widths3 = [35, 22, 22, 22, 50, 14, 28, 20, 16, 16]
+            # LinkedIn hyperlink (col 5)
+            if linkedin and linkedin.startswith("http"):
+                cell = ws3.cell(row=row_idx, column=5)
+                cell.hyperlink = linkedin
+                cell.font = link_font
+
+        col_widths3 = [22, 22, 22, 22, 45, 14, 28, 20, 14, 16, 40, 60, 10, 6]
         for i, w in enumerate(col_widths3, 1):
             ws3.column_dimensions[get_column_letter(i)].width = w
         ws3.freeze_panes = "A2"
@@ -865,14 +888,29 @@ def main():
                 })
 
     # ── Cold Outreach ─────────────────────────────────────────────────────────
+    # Source: VC portfolio scrapers only (ERA NYC, FJ Labs, Betaworks, Pioneer, etc.)
+    # Completely separate from the Jobs/Outreach pipeline — no shared rows.
     cold_outreach_data = []
     if args.cold_outreach and not args.scrape_only:
         from cold_outreach import run_cold_outreach
         import cold_outreach as _co_module
-        cold_outreach_data = run_cold_outreach(COMPANIES[:25], client, max_companies=args.cold_outreach_limit)
+        print("\nRunning cold outreach pipeline (VC portfolio sources only)...\n")
+        cold_outreach_data = run_cold_outreach(client, max_companies=args.cold_outreach_limit)
         # Sync the tool_use block counter from the cold_outreach module
         global tool_use_block_count
         tool_use_block_count += _co_module.tool_use_block_count
+
+        # Dedup: if a VC company already has an active job posting in this run,
+        # it belongs in the Outreach tab only — remove it from Cold Outreach
+        job_company_names = {j["company"].lower().strip() for j in all_jobs}
+        before = len(cold_outreach_data)
+        cold_outreach_data = [
+            r for r in cold_outreach_data
+            if r["company"].lower().strip() not in job_company_names
+        ]
+        removed = before - len(cold_outreach_data)
+        if removed:
+            print(f"  [dedup] Removed {removed} company(ies) from Cold Outreach (already in Jobs tab)\n")
     elif args.cold_outreach and args.scrape_only:
         print("--scrape-only active: skipping cold outreach\n")
 
@@ -880,9 +918,18 @@ def main():
 
     print("\n" + "=" * 60)
     print("  COMPLETE")
-    print(f"  {len(all_jobs)} jobs | {fresh} fresh | {len(outreach)} outreach drafted")
-    if cold_outreach_data:
-        print(f"  {len(cold_outreach_data)} cold outreach contacts researched")
+    print(f"  Jobs tab:         {len(all_jobs)} jobs ({fresh} posted in last 24h)")
+    print(f"  Outreach tab:     {len(outreach)} contacts (job-specific recruiter/engineer outreach)")
+    print(f"  Cold Outreach tab: {len(cold_outreach_data)} contacts (VC portfolio founder/CEO cold email)")
+    if cold_outreach_data and outreach:
+        # Verify no overlap
+        outreach_cos = {r["company"].lower().strip() for r in outreach}
+        cold_cos = {r["company"].lower().strip() for r in cold_outreach_data}
+        overlap = outreach_cos & cold_cos
+        if overlap:
+            print(f"  WARNING: {len(overlap)} company(ies) still in both tabs: {overlap}")
+        else:
+            print(f"  OK: No companies shared between Outreach and Cold Outreach tabs")
     print(f"  File: {fname}")
     print(f"\n  Tool-use blocks in Claude API responses: {tool_use_block_count}")
     if tool_use_block_count == 0:

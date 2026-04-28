@@ -26,8 +26,8 @@ load_dotenv(override=True)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 CACHE_FILE       = "cold_outreach_cache.json"
-CALL_DELAY       = 3          # seconds between Claude API calls
-RATE_LIMIT_WAIT  = 22         # seconds to wait on 429
+CALL_DELAY       = 45         # seconds between Claude API calls (web search ~10k tokens/call, 30k/min limit = 45s safe gap)
+RATE_LIMIT_WAIT  = 45         # seconds to wait on rate limit before retry (exponential backoff applied)
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
@@ -474,7 +474,99 @@ def write_excel(rows):
     return fname
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Pipeline Integration ──────────────────────────────────────────────────────
+
+def run_cold_outreach(client, max_companies=5, refresh=False):
+    """
+    Scrape VC portfolio sites, research founders, and return result rows.
+    Called by job_pipeline_full.py when --cold-outreach is passed.
+
+    Source: VC portfolio scrapers only (ERA NYC, FJ Labs, Betaworks, Pioneer, etc.)
+    Never receives or processes companies from the ATS/Jobs pipeline.
+
+    Returns list of dicts with keys:
+        site, company, source, contact_name, contact_title,
+        linkedin_url, contact_date, email, domain,
+        email_subject, email_body, founded, is_new
+    """
+    cache = {} if refresh else load_cache()
+
+    # Scrape VC portfolio sites — this is the ONLY source for cold outreach
+    companies = scrape_all_sources()
+
+    new_companies = [c for c in companies if c["company_name"].lower().strip() not in cache]
+    skipped = len(companies) - len(new_companies)
+    print(f"Cold Outreach cache: {skipped} already processed, {len(new_companies)} new\n")
+
+    if max_companies:
+        new_companies = new_companies[:max_companies]
+        print(f"[cold outreach] Researching first {max_companies} new companies\n")
+
+    total = len(new_companies)
+    results = []
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    for idx, company in enumerate(new_companies, 1):
+        name    = company["company_name"].strip()
+        website = company.get("website", "")
+        source  = company.get("source", "")
+        print(f"  Cold outreach [{name}] ({idx}/{total}) -- {source}")
+
+        # 1. Classify as tech or not
+        is_tech = classify_tech(name, website, client)
+        if not is_tech:
+            print(f"    Skipping: not a tech/software company")
+            cache[name.lower().strip()] = {"skipped": True, "reason": "non-tech"}
+            save_cache(cache)
+            continue
+
+        # 2. Get founding year
+        founded = get_founding_year(name, website, client)
+        is_new  = founded is not None and founded >= 2023
+
+        # 3. Find founder / CEO
+        contact       = find_founder(name, client)
+        contact_name  = contact.get("name", "")
+        contact_title = contact.get("title", "")
+        linkedin_url  = contact.get("linkedin_url", "")
+        email         = contact.get("email", "")
+        print(f"    Contact: {contact_name or '(none found)'} | Email: {email or '(none)'} | Founded: {founded or '?'} {'[NEW]' if is_new else ''}")
+
+        # 4. Draft cold email
+        email_subject, email_body = draft_email(name, website, contact_name, contact_title, client)
+
+        domain = extract_domain(website)
+        row = {
+            "site":          website,
+            "company":       name,
+            "source":        source,
+            "contact_name":  contact_name,
+            "contact_title": contact_title,
+            "linkedin_url":  linkedin_url,
+            "contact_date":  today,
+            "email":         email,
+            "domain":        domain,
+            "email_subject": email_subject,
+            "email_body":    email_body,
+            "founded":       founded or "",
+            "is_new":        is_new,
+        }
+        results.append(row)
+
+        cache[name.lower().strip()] = {
+            "processed_date": today,
+            "contact":        contact_name,
+            "email":          email,
+            "founded":        founded,
+        }
+        save_cache(cache)
+
+    # Sort: NEW companies (2023+) first, then alphabetical
+    results.sort(key=lambda r: (0 if r.get("is_new") else 1, r["company"]))
+    return results
+
+
+# ── Main (standalone) ─────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser()
