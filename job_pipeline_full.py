@@ -786,7 +786,7 @@ def main():
     ]
     def is_usa_location(loc):
         if not loc or not isinstance(loc, str):
-            return False
+            return True  # unknown/missing location → assume US-eligible, don't drop
         location_str = loc.lower()
         non_us_keywords = [
             "dublin", "luxembourg", "bengaluru", "são paulo", "warsaw", "toronto", "canada", "india", "brazil", "ireland", "germany", "uk", "united kingdom", "france", "europe", "singapore", "australia", "china", "japan", "hong kong", "mexico", "spain", "netherlands", "sweden", "switzerland", "italy", "israel", "uae", "dubai", "new zealand", "south africa", "argentina", "chile", "colombia", "peru", "denmark", "norway", "finland", "belgium", "austria", "czech", "poland", "russia", "turkey", "egypt", "saudi", "korea", "taiwan", "malaysia", "thailand", "philippines", "indonesia", "vietnam", "romania", "portugal", "greece", "ukraine", "hungary", "slovakia", "slovenia", "croatia", "serbia", "bulgaria", "latvia", "lithuania", "estonia", "africa", "asia", "south america", "middle east"

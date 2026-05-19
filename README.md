@@ -34,7 +34,7 @@ It includes:
 - Cold Outreach table with Apollo links and editable email pattern fields
 - Settings page for profile, pipeline config, and API key status
 
-**Live:** [earlybird-ui.vercel.app](https://earlybird-ui.vercel.app)
+**Live:** [earlybird-ashen.vercel.app](https://earlybird-ashen.vercel.app)
 
 To run locally:
 ```bash
