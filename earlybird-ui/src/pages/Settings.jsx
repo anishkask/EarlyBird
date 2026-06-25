@@ -75,6 +75,10 @@ export default function Settings({ settings, onSave, onRun }) {
               placeholder="sk-ant-..."
               value={anthropicApiKey}
               onChange={e => { setAnthropicApiKey(e.target.value); setSaved(false) }}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
               className={`flex-1 border rounded-lg px-3 py-2 text-sm outline-none ${
                 keySet
                   ? 'border-green-300 bg-green-50 focus:border-green-400'

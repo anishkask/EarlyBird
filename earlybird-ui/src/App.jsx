@@ -93,8 +93,8 @@ export default function App() {
     try {
       const res = await fetch(`${API_URL}/results/${runId}`)
       const data = await res.json()
-      if (data.error) {
-        setRunError(data.error)
+      if (!res.ok || data.error || data.detail) {
+        setRunError(data.error || data.detail || `Could not load results (${res.status}).`)
         return
       }
       setRunError(null)

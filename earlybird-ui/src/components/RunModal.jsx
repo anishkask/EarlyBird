@@ -17,6 +17,16 @@ export default function RunModal({ apiUrl, apiKey: propApiKey, onClose, onComple
       const timer = setInterval(async () => {
         try {
           const res = await fetch(`${apiUrl}/status/${runId}`)
+
+          if (res.status === 404) {
+            // Run expired or purged from the server before we read it.
+            clearInterval(timer)
+            setStatusMsg('Run expired before results could be retrieved. Please run again.')
+            setRunning(false)
+            resolve()
+            return
+          }
+
           const data = await res.json()
           const s = data.status
 
@@ -32,7 +42,7 @@ export default function RunModal({ apiUrl, apiKey: propApiKey, onClose, onComple
             onClose()
           } else if (s === 'error') {
             clearInterval(timer)
-            setStatusMsg(`Error: ${data.error || 'Unknown error'}`)
+            setStatusMsg(data.error || 'Pipeline run failed.')
             setRunning(false)
             resolve(data)
           } else if (Date.now() - start > maxWait) {
@@ -66,7 +76,14 @@ export default function RunModal({ apiUrl, apiKey: propApiKey, onClose, onComple
           cold_outreach_limit: 10,
         }),
       })
-      if (!res.ok) throw new Error(`Server error: ${res.status}`)
+      if (!res.ok) {
+        let detail = `Server error: ${res.status}`
+        try {
+          const err = await res.json()
+          if (err.detail) detail = typeof err.detail === 'string' ? err.detail : 'Invalid request.'
+        } catch { /* non-JSON error body */ }
+        throw new Error(detail)
+      }
       const { run_id } = await res.json()
       setStatusMsg(`Run started (ID: ${run_id}) — polling every 5 seconds...`)
       await pollStatus(run_id)
@@ -97,6 +114,10 @@ export default function RunModal({ apiUrl, apiKey: propApiKey, onClose, onComple
                   placeholder="sk-ant-..."
                   value={localApiKey}
                   onChange={e => setLocalApiKey(e.target.value)}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
                   className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-jay-blue"
                 />
                 <p className="text-xs text-slate-400 mt-1">
