@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Cold Outreach Module
-Scrapes VC portfolio sites, classifies tech companies, finds founders/CEOs via
-Claude web search, and drafts personalized cold outreach emails.
+Scrapes VC portfolio sites, classifies tech companies, and finds founders/CEOs via
+Claude web search.
 
 Standalone:  python cold_outreach.py [--refresh] [--limit N]
 Via pipeline: imported by job_pipeline_full.py --cold-outreach
@@ -282,7 +282,7 @@ def _claude_call(client, prompt, max_tokens=500, retries=3):
     for attempt in range(retries + 1):
         try:
             response = client.messages.create(
-                model="claude-sonnet-4-5",
+                model="claude-sonnet-4-20250514",
                 max_tokens=max_tokens,
                 tools=[{"type": "web_search_20250305", "name": "web_search"}],
                 messages=[{"role": "user", "content": prompt}]
@@ -321,6 +321,66 @@ def _parse_json(text):
     return None
 
 
+def get_hq_city(company_name, website, client):
+    """Use Claude web search to find the company's headquarters city. Returns a string like
+    'Philadelphia, PA', 'Remote', or 'Unknown'."""
+    prompt = (
+        f"Search the web for the headquarters city of the company '{company_name}' "
+        f"(website: {website}). "
+        f"Reply with only a short location string such as 'Philadelphia, PA' or 'New York, NY' "
+        f"or 'Remote' if the company is fully remote/distributed. "
+        f"If you cannot determine it, reply 'Unknown'. "
+        f"Reply JSON only: {{\"hq_city\": \"Philadelphia, PA\"}}"
+    )
+    text, _ = _claude_call(client, prompt, max_tokens=150)
+    time.sleep(CALL_DELAY)
+    data = _parse_json(text)
+    if data and isinstance(data, dict):
+        city = data.get("hq_city", "Unknown")
+        return city if city else "Unknown"
+    return "Unknown"
+
+
+def is_target_area(city_str):
+    """Return True if city_str is in the Philadelphia area, NYC area, remote, or unknown."""
+    if not city_str:
+        return True
+    c = city_str.lower()
+
+    # Always keep if unknown
+    if "unknown" in c:
+        return True
+
+    # Remote / distributed
+    remote_keywords = ["remote", "distributed", "no office", "fully remote"]
+    if any(k in c for k in remote_keywords):
+        return True
+
+    # Philadelphia area — word-boundary match on 'pa' to avoid false positives
+    philly_keywords = [
+        "philadelphia", "exton", "king of prussia", "malvern", "wayne",
+        "conshohocken", "blue bell", "horsham", "berwyn", "radnor",
+        "villanova", "bryn mawr", "west chester", "newtown square",
+    ]
+    if any(k in c for k in philly_keywords):
+        return True
+    # standalone 'pa' as a word
+    if re.search(r'\bpa\b', c):
+        return True
+
+    # NYC area — word-boundary match on 'ny' and 'nyc'
+    nyc_keywords = [
+        "new york", "manhattan", "brooklyn", "queens", "bronx",
+        "jersey city", "hoboken", "newark",
+    ]
+    if any(k in c for k in nyc_keywords):
+        return True
+    if re.search(r'\bnyc\b', c) or re.search(r'\bny\b', c):
+        return True
+
+    return False
+
+
 def classify_tech(company_name, website, client):
     """Return True if the company is a software/AI/tech company."""
     prompt = (
@@ -356,43 +416,39 @@ def get_founding_year(company_name, website, client):
 
 def find_founder(company_name, client):
     """Find CEO or co-founder via Claude web search."""
-    prompt = (
-        f"Search LinkedIn and the web right now for the CEO or co-founder of {company_name}. "
-        f"Find their full name, title, LinkedIn URL, and email if publicly available. "
-        f"Return only real people found via web search. "
-        f'Return JSON only: {{"name": "", "title": "", "linkedin_url": "", "email": ""}}'
-    )
-    text, _ = _claude_call(client, prompt, max_tokens=600)
-    time.sleep(CALL_DELAY)
-    data = _parse_json(text)
-    if data and isinstance(data, dict):
-        return data
-    return {"name": "", "title": "", "linkedin_url": "", "email": ""}
-
-
-def draft_email(company_name, website, contact_name, contact_title, client):
-    """Draft a personalized cold outreach email."""
-    portfolio = YOUR_PORTFOLIO or "my portfolio"
-    name = YOUR_NAME or "Anishka"
-    prompt = (
-        f"Search the web for recent news or product updates about {company_name} ({website}). "
-        f"Then draft a short cold outreach email from {name} to {contact_name or 'the founder'} "
-        f"({contact_title or 'CEO'}) at {company_name}.\n\n"
-        f"Background: {name} is a CS student with experience in Python, FastAPI, React, TypeScript, "
-        f"PostgreSQL, RAG pipelines, Claude API, and deployed projects including EarlyBird. "
-        f"Interested in smaller companies for ownership and direct impact.\n"
-        f"Portfolio: {portfolio}\n\n"
-        f"Rules: Subject must be specific to what {company_name} builds. Opening must reference "
-        f"one real, specific thing the company is working on. No em-dashes. No flattery. "
-        f"No filler phrases. Professional and direct. Close with a specific ask for a 15-minute call. "
-        f'Return JSON only: {{"subject": "", "body": ""}}'
-    )
-    text, _ = _claude_call(client, prompt, max_tokens=800)
-    time.sleep(CALL_DELAY)
-    data = _parse_json(text)
-    if data and isinstance(data, dict):
-        return data.get("subject", ""), data.get("body", "")
-    return "", ""
+    global tool_use_block_count
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1000,
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
+            messages=[{"role": "user", "content": f"Search LinkedIn and the web right now for the CEO or co-founder of {company_name}. Find their full name, title, LinkedIn URL, and email if publicly available. Return only real people found via web search. Return JSON only: {{\"name\": \"\", \"title\": \"\", \"linkedin_url\": \"\", \"email\": \"\"}}"}]
+        )
+        count = sum(
+            1 for b in response.content
+            if hasattr(b, "type") and b.type in ("tool_use", "server_tool_use")
+        )
+        tool_use_block_count += count
+        result_text = ""
+        for block in response.content:
+            if block.type == "text":
+                result_text += block.text
+        # Strip ```json fences before parsing
+        clean = re.sub(r"```json|```", "", result_text).strip()
+        match = re.search(r"(\{.*?\}|\[.*?\])", clean, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group())
+                if isinstance(data, dict):
+                    return data
+                if isinstance(data, list) and data:
+                    return data[0]
+            except Exception as e:
+                print(f"WARNING: [find_founder:{company_name}] JSON parse error: {e}")
+        return {"name": "", "title": "", "linkedin_url": "", "email": ""}
+    except Exception as e:
+        print(f"WARNING: [find_founder:{company_name}] {e}")
+        return {"name": "", "title": "", "linkedin_url": "", "email": ""}
 
 
 # ── Excel output ──────────────────────────────────────────────────────────────
@@ -416,7 +472,7 @@ def write_excel(rows):
     headers = [
         "Site", "Company", "Contact Name", "Title", "LinkedIn URL",
         "Contact Date", "Email", "Company Domain",
-        "Apollo Lookup", "Email Pattern", "Email Subject", "Email Body",
+        "Apollo Lookup", "Email Pattern",
         "Founded", "NEW?"
     ]
     ws.append(headers)
@@ -442,8 +498,6 @@ def write_excel(rows):
             domain,
             "Open Apollo" if apollo else "",
             "",   # Email Pattern — manual
-            row.get("email_subject", ""),
-            row.get("email_body", ""),
             row.get("founded", ""),
             "NEW" if is_new else "",
         ])
@@ -465,7 +519,7 @@ def write_excel(rows):
             cell.hyperlink = linkedin
             cell.font      = link_font
 
-    col_widths = [35, 22, 22, 22, 45, 14, 28, 20, 14, 16, 40, 60, 10, 6]
+    col_widths = [35, 22, 22, 22, 45, 14, 28, 20, 14, 16, 10, 6]
     for i, w in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A2"
@@ -487,7 +541,7 @@ def run_cold_outreach(client, max_companies=5, refresh=False):
     Returns list of dicts with keys:
         site, company, source, contact_name, contact_title,
         linkedin_url, contact_date, email, domain,
-        email_subject, email_body, founded, is_new
+        founded, is_new
     """
     cache = {} if refresh else load_cache()
 
@@ -520,20 +574,26 @@ def run_cold_outreach(client, max_companies=5, refresh=False):
             save_cache(cache)
             continue
 
-        # 2. Get founding year
+        # 2. Geography filter: keep only PHL/NYC area or remote-first companies
+        hq_city = get_hq_city(name, website, client)
+        if not is_target_area(hq_city):
+            print(f"    DROPPED {name} -- {hq_city} (outside target area)")
+            cache[name.lower().strip()] = {"skipped": True, "reason": f"outside target area: {hq_city}"}
+            save_cache(cache)
+            continue
+        print(f"    KEPT {name} -- {hq_city}")
+
+        # 3. Get founding year
         founded = get_founding_year(name, website, client)
         is_new  = founded is not None and founded >= 2023
 
-        # 3. Find founder / CEO
+        # 4. Find founder / CEO
         contact       = find_founder(name, client)
         contact_name  = contact.get("name", "")
         contact_title = contact.get("title", "")
         linkedin_url  = contact.get("linkedin_url", "")
         email         = contact.get("email", "")
         print(f"    Contact: {contact_name or '(none found)'} | Email: {email or '(none)'} | Founded: {founded or '?'} {'[NEW]' if is_new else ''}")
-
-        # 4. Draft cold email
-        email_subject, email_body = draft_email(name, website, contact_name, contact_title, client)
 
         domain = extract_domain(website)
         row = {
@@ -546,8 +606,6 @@ def run_cold_outreach(client, max_companies=5, refresh=False):
             "contact_date":  today,
             "email":         email,
             "domain":        domain,
-            "email_subject": email_subject,
-            "email_body":    email_body,
             "founded":       founded or "",
             "is_new":        is_new,
         }
@@ -616,20 +674,26 @@ def main():
             save_cache(cache)
             continue
 
-        # 2. Get founding year
+        # 2. Geography filter: keep only PHL/NYC area or remote-first companies
+        hq_city = get_hq_city(name, website, client)
+        if not is_target_area(hq_city):
+            print(f"  DROPPED {name} -- {hq_city} (outside target area)")
+            cache[name.lower().strip()] = {"skipped": True, "reason": f"outside target area: {hq_city}"}
+            save_cache(cache)
+            continue
+        print(f"  KEPT {name} -- {hq_city}")
+
+        # 3. Get founding year
         founded = get_founding_year(name, website, client)
         is_new  = founded is not None and founded >= 2023
 
-        # 3. Find founder / CEO
+        # 4. Find founder / CEO
         contact = find_founder(name, client)
         contact_name  = contact.get("name", "")
         contact_title = contact.get("title", "")
         linkedin_url  = contact.get("linkedin_url", "")
         email         = contact.get("email", "")
         print(f"  Contact: {contact_name or '(none found)'} | Email: {email or '(none)'} | Founded: {founded or '?'} {'[NEW]' if is_new else ''}")
-
-        # 4. Draft email
-        email_subject, email_body = draft_email(name, website, contact_name, contact_title, client)
 
         domain = extract_domain(website)
         row = {
@@ -642,8 +706,6 @@ def main():
             "contact_date":  today,
             "email":         email,
             "domain":        domain,
-            "email_subject": email_subject,
-            "email_body":    email_body,
             "founded":       founded or "",
             "is_new":        is_new,
         }

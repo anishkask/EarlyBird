@@ -1,15 +1,5 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import Badge from '../components/Badge'
-
-const ALL_JOBS = [
-  { id: 1, title: 'ML Engineering Intern 2026',     company: 'Brex',     location: 'Remote',         source: 'Greenhouse', age: '2h ago',  ageH: 2,  score: 100, status: 'Not Applied' },
-  { id: 2, title: 'Software Engineering Intern',    company: 'Airbnb',   location: 'Remote',         source: 'Greenhouse', age: '4h ago',  ageH: 4,  score: 85,  status: 'Applied' },
-  { id: 3, title: 'Backend Engineer Intern',        company: 'Notion',   location: 'United States',  source: 'Greenhouse', age: '18h ago', ageH: 18, score: 75,  status: 'Not Applied' },
-  { id: 4, title: 'Data Engineering Intern',        company: 'Coinbase', location: 'Remote',         source: 'Lever',      age: '22h ago', ageH: 22, score: 100, status: 'Not Applied' },
-  { id: 5, title: 'Fullstack Intern 2026',          company: 'Vercel',   location: 'Remote',         source: 'Lever',      age: '36h ago', ageH: 36, score: 45,  status: 'Not Applied' },
-  { id: 6, title: 'AI/LLM Research Intern',         company: 'Linear',   location: 'Remote',         source: 'Lever',      age: '48h ago', ageH: 48, score: 100, status: 'Not Applied' },
-  { id: 7, title: 'Software Engineering Co-op',     company: 'Retool',   location: 'Philadelphia PA', source: 'Greenhouse', age: '55h ago', ageH: 55, score: 60,  status: 'Not Applied' },
-]
 
 function rowColor(ageH) {
   if (ageH <= 6)  return 'bg-green-50 hover:bg-green-100'
@@ -25,11 +15,25 @@ function ageColor(ageH) {
   return 'gray'
 }
 
-export default function Jobs() {
+export default function Jobs({ pipeline, loading }) {
   const [search, setSearch] = useState('')
   const [source, setSource] = useState('All')
 
-  const filtered = ALL_JOBS.filter(j => {
+  if (!loading && !pipeline) {
+    return (
+      <div className="bg-white rounded-xl p-6 shadow-sm border border-slate-100">
+        <h2 className="text-lg font-semibold text-slate-800">No job leads yet</h2>
+        <p className="text-sm text-slate-500 mt-2">Go to <strong>Settings</strong>, enter your Anthropic API key, then click <strong>Run Pipeline</strong>.</p>
+      </div>
+    )
+  }
+
+  const sources = useMemo(() => {
+    const distinct = Array.from(new Set(jobs.map(j => j.source).filter(Boolean)))
+    return ['All', ...distinct]
+  }, [jobs])
+
+  const filtered = jobs.filter(j => {
     const q = search.toLowerCase()
     const matchSearch = j.title.toLowerCase().includes(q) || j.company.toLowerCase().includes(q)
     const matchSource = source === 'All' || j.source === source
@@ -52,8 +56,8 @@ export default function Jobs() {
           onChange={e => setSource(e.target.value)}
           className="border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none bg-white"
         >
-          {['All', 'Greenhouse', 'Lever', 'LinkedIn', 'Indeed'].map(s => (
-            <option key={s}>{s}</option>
+          {sources.map(s => (
+            <option key={s} value={s}>{s}</option>
           ))}
         </select>
       </div>
@@ -70,7 +74,7 @@ export default function Jobs() {
           </thead>
           <tbody>
             {filtered.map((j, idx) => (
-              <tr key={j.id} className={`border-b border-slate-50 transition-colors ${rowColor(j.ageH)}`}>
+              <tr key={`${j.id}-${idx}`} className={`border-b border-slate-50 transition-colors ${rowColor(j.hoursAgo)}`}>
                 <td className="px-4 py-3 text-slate-400 text-xs">{idx + 1}</td>
                 <td className="px-4 py-3 font-medium text-slate-800 max-w-xs">
                   <span className="truncate block">{j.title}</span>
@@ -78,17 +82,24 @@ export default function Jobs() {
                 <td className="px-4 py-3 text-slate-600">{j.company}</td>
                 <td className="px-4 py-3 text-slate-500 text-xs">{j.location}</td>
                 <td className="px-4 py-3 text-slate-500 text-xs">{j.source}</td>
-                <td className="px-4 py-3"><Badge color={ageColor(j.ageH)}>{j.age}</Badge></td>
+                <td className="px-4 py-3"><Badge color={ageColor(j.hoursAgo)}>{j.posted}</Badge></td>
                 <td className="px-4 py-3">
                   <span className={`font-bold text-sm ${j.score >= 75 ? 'text-green-600' : j.score >= 40 ? 'text-amber-600' : 'text-slate-400'}`}>
                     {j.score}
                   </span>
                 </td>
                 <td className="px-4 py-3">
-                  <Badge color={j.status === 'Applied' ? 'green' : 'gray'}>{j.status}</Badge>
+                  <Badge color={j.status === 'Applied' ? 'green' : 'gray'}>{j.status || 'Not Applied'}</Badge>
                 </td>
                 <td className="px-4 py-3">
-                  <a href="#" className="text-xs text-jay-blue hover:underline whitespace-nowrap">Apply</a>
+                  <a
+                    href={j.jobUrl || '#'}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs text-jay-blue hover:underline whitespace-nowrap"
+                  >
+                    Apply
+                  </a>
                 </td>
               </tr>
             ))}
@@ -96,7 +107,7 @@ export default function Jobs() {
         </table>
         <div className="px-4 py-3 border-t border-slate-100 flex items-center justify-between">
           <p className="text-xs text-slate-400">
-            Showing {filtered.length} of {ALL_JOBS.length} jobs
+            Showing {filtered.length} of {jobs.length} jobs
           </p>
           <div className="flex gap-2">
             <button className="px-3 py-1 rounded border border-slate-200 text-xs text-slate-500 hover:bg-slate-50">Prev</button>

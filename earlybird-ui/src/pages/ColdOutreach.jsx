@@ -1,27 +1,25 @@
 import { useState } from 'react'
 
-const COLD = [
-  { company: 'Airbnb',        contact: 'Caitlin Wright', title: 'Recruiter',          email: 'c.wright@airbnb.com',   domain: 'airbnb.com',   found: true },
-  { company: 'Notion',        contact: 'Shivani Patel',  title: 'Campus Recruiter',   email: 's.patel@notion.so',     domain: 'notion.so',    found: true },
-  { company: 'Brex',          contact: '',               title: '',                   email: '',                      domain: 'brex.com',     found: false },
-  { company: 'Vercel',        contact: 'Maya Kim',       title: 'Univ. Recruiting',   email: 'm.kim@vercel.com',      domain: 'vercel.com',   found: true },
-  { company: 'Coinbase',      contact: '',               title: '',                   email: '',                      domain: 'coinbase.com', found: false },
-  { company: 'Linear',        contact: 'James Park',     title: 'Recruiting Lead',    email: '',                      domain: 'linear.app',   found: true },
-  { company: 'Retool',        contact: '',               title: '',                   email: '',                      domain: 'retool.com',   found: false },
-  { company: 'Eulerity',      contact: 'Sara Chen',      title: 'Campus Recruiter',   email: 's.chen@eulerity.com',   domain: 'eulerity.com', found: true },
-  { company: 'Monarch Money', contact: '',               title: '',                   email: '',                      domain: 'monarchmoney.com', found: false },
-  { company: 'Glydways',      contact: 'Tom Nguyen',     title: 'HR Generalist',      email: '',                      domain: 'glydways.com', found: true },
-]
-
-export default function ColdOutreach() {
+export default function ColdOutreach({ pipeline }) {
   const [patterns, setPatterns] = useState({})
-  const found = COLD.filter(c => c.found).length
+
+  if (!pipeline) {
+    return (
+      <div className="bg-white rounded-xl p-6 shadow-sm border border-slate-100">
+        <h2 className="text-lg font-semibold text-slate-800">No cold outreach data yet</h2>
+        <p className="text-sm text-slate-500 mt-2">Go to <strong>Settings</strong>, enter your Anthropic API key, then click <strong>Run Pipeline</strong>.</p>
+      </div>
+    )
+  }
+
+  const rows = pipeline?.coldOutreach || []
+  const found = rows.filter(r => r.contactName).length
 
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
         <p className="text-sm text-slate-500">
-          Campus recruiters found via live web search &mdash; {found}/{COLD.length} contacts found
+          Campus recruiters found via live web search &mdash; {found}/{rows.length} contacts found
         </p>
         <button className="bg-jay-blue text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-jay-crest transition-colors flex items-center gap-2">
           <SearchIcon className="w-4 h-4" />
@@ -39,12 +37,12 @@ export default function ColdOutreach() {
             </tr>
           </thead>
           <tbody>
-            {COLD.map(row => (
+            {rows.map(row => (
               <tr key={row.company} className="border-b border-slate-50 hover:bg-slate-50 transition-colors">
                 <td className="px-4 py-3 font-medium text-slate-800">{row.company}</td>
                 <td className="px-4 py-3">
-                  {row.contact
-                    ? <span className="text-slate-700 font-medium">{row.contact}</span>
+                  {row.contactName
+                    ? <span className="text-slate-700 font-medium">{row.contactName}</span>
                     : <span className="text-slate-300 italic text-xs">Not found</span>
                   }
                 </td>
@@ -55,10 +53,10 @@ export default function ColdOutreach() {
                     : <span className="text-slate-300 text-xs">—</span>
                   }
                 </td>
-                <td className="px-4 py-3 text-slate-400 text-xs">{row.domain}</td>
+                <td className="px-4 py-3 text-slate-400 text-xs">{row.companyDomain}</td>
                 <td className="px-4 py-3">
                   <a
-                    href={`https://app.apollo.io/#/people?q_organization_domains[]=${row.domain}`}
+                    href={row.apolloLookup || `https://app.apollo.io/#/people?q_organization_domains[]=${row.companyDomain}`}
                     target="_blank"
                     rel="noreferrer"
                     className="text-purple-500 text-xs hover:underline whitespace-nowrap"
@@ -75,7 +73,7 @@ export default function ColdOutreach() {
                   />
                 </td>
                 <td className="px-4 py-3">
-                  {row.found ? (
+                  {row.contactName ? (
                     <button className="text-xs bg-jay-blue text-white px-3 py-1 rounded-lg hover:bg-jay-crest transition-colors whitespace-nowrap">
                       Reach Out
                     </button>
@@ -91,7 +89,7 @@ export default function ColdOutreach() {
         </table>
         <div className="px-4 py-3 border-t border-slate-100">
           <p className="text-xs text-slate-400">
-            {found} contacts found via web search · {COLD.length - found} pending · Apollo links open by domain
+            {found} contacts found via web search · {rows.length - found} pending · Apollo links open by domain
           </p>
         </div>
       </div>
