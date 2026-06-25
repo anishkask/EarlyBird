@@ -2,71 +2,113 @@
 
 > Apply before everyone else does.
 
-EarlyBird is a job search automation pipeline for students and early-career engineers who want to apply to roles within hours of posting — before listings hit mass job boards and inboxes flood with applicants.
+EarlyBird is a job search automation tool for students and early-career engineers who want to apply to roles within hours of posting, before listings hit mass job boards and inboxes flood with applicants.
 
-It polls company ATS systems (Greenhouse, Lever), runs live web searches for campus recruiters, drafts personalized outreach messages, and outputs a color-coded Excel tracker. There is also a React dashboard for viewing results.
+It polls company ATS systems (Greenhouse and Lever), runs live web searches for recruiters and founders, drafts personalized outreach messages, and presents everything in a React dashboard backed by a FastAPI server. It also runs as a standalone CLI that writes a color-coded Excel tracker.
 
----
+## Architecture
+
+EarlyBird has three parts:
+
+1. Pipeline (`job_pipeline_full.py`, `cold_outreach.py`): the core scraping, contact research, and outreach logic. Runs from the CLI and writes Excel, or is called by the API.
+2. Backend (`api.py`): a FastAPI server that runs the pipeline in a background thread and returns results as JSON. Each visitor supplies their own Anthropic API key per request.
+3. Frontend (`earlybird-ui/`): a React + Vite + Tailwind dashboard. Users enter their key, run the pipeline, and view jobs and contacts in the browser.
+
+Live site: [earlybird-ashen.vercel.app](https://earlybird-ashen.vercel.app)
 
 ## Features
 
-- Scrapes Greenhouse, Lever, LinkedIn, Indeed, Wellfound within hours of posting
-- Filters by US location and remote — no international noise
-- Scores each role 0-100 by keyword match against your background
+- Scrapes Greenhouse, Lever, LinkedIn, Indeed, and Wellfound within hours of posting
+- Dynamic ATS discovery: finds and verifies company job boards in real time instead of relying on a fixed company list
+- Filters by US location and remote, removing international noise
 - Deduplicates across sources so the same role never appears twice
-- Uses Claude API with live web search to find real campus recruiters by name
-- Drafts personalized LinkedIn messages and emails per contact
-- Generates a color-coded Excel file: green = posted under 6h, blue = under 24h, yellow = under 48h
-- Cold outreach tab: researches campus recruiters at target companies even with no open roles
-- Apollo Lookup links and Company Domain columns for email pattern discovery
-- Prints tool-use block count to confirm web search is actually running
+- Uses the Claude API with live web search to find real recruiters and founders by name
+- Drafts a LinkedIn message per contact that you review and send manually
+- Cold outreach: researches founders and CEOs at VC portfolio companies, even those with no open roles
+- Apollo lookup links and company domain columns for email pattern discovery
+- CLI still generates a color-coded Excel file: green for posted under 6h, blue for under 24h, yellow for under 48h
 
----
+## Using the live site
 
-## Dashboard (React)
+1. Open [earlybird-ashen.vercel.app](https://earlybird-ashen.vercel.app)
+2. Go to Settings and enter your Anthropic API key. The key is held in memory for the session only. It is never written to disk or stored on the server.
+3. Optionally set your school, target locations, role keywords, and skills, then click Save Settings.
+4. Click Run Pipeline. The run starts in the background and the page polls for status every 5 seconds.
+5. After a few minutes, results appear in the Job Leads, Outreach, and Cold Outreach tabs.
 
-A React + Vite frontend is included in `earlybird-ui/` and deployed to Vercel.
+A run takes roughly 3 to 5 minutes depending on how many companies have fresh postings.
 
-It includes:
-- Dashboard with stat cards, fresh job highlights, outreach to-do list, source breakdown
-- Job Leads table with search, filter, and color-coded rows
-- Outreach panel with LinkedIn message and email draft per contact
-- Cold Outreach table with Apollo links and editable email pattern fields
-- Settings page for profile, pipeline config, and API key status
+## Dynamic ATS discovery
 
-**Live:** [earlybird-ashen.vercel.app](https://earlybird-ashen.vercel.app)
+Instead of a hardcoded company list, `build_dynamic_watchlist()` builds the watchlist on every run:
 
-To run locally:
+1. Reads `data/cold_outreach_cache.json`, which accumulates companies discovered by VC portfolio scraping.
+2. For each company, constructs candidate slugs and checks live Greenhouse and Lever endpoints with a short timeout.
+3. Keeps companies whose boards return an active, non-empty jobs list.
+4. Caches verified slugs in `watchlist_cache.json` and reuses the cache for a week before re-verifying.
+5. Also pulls additional companies from real-time sources such as YC Work at a Startup and Wellfound.
+
+The watchlist grows as cold outreach discovers more companies, and shrinks as companies stop posting.
+
+## Security
+
+The site is designed to be used by any visitor with their own API key, so it takes the following precautions:
+
+- API keys are accepted per request, used only for that run, and never logged, written to disk, or stored in the run record.
+- Pipeline results contain personal contact data, so each run is keyed by a high-entropy, unguessable token. Unknown or expired tokens return 404, which closes insecure-direct-object-reference access.
+- Runs auto-expire after 30 minutes and the in-memory store is size-capped, so personal data does not linger.
+- Per-IP rate limiting and a concurrency cap bound abuse and resource exhaustion.
+- Strict input validation on every field. Raw exceptions are logged on the server and never returned to clients.
+- CORS is restricted to the deployed frontend origin. Interactive API docs are disabled.
+- The frontend sends a Content-Security-Policy, HSTS, X-Frame-Options, and related headers. API key inputs disable browser autofill and storage.
+
+## Local development
+
+### Backend
+
+```bash
+pip install -r requirements.txt
+uvicorn api:app --reload --port 8000
+```
+
+The API is then available at `http://localhost:8000`. Check `http://localhost:8000/health`.
+
+### Frontend
+
 ```bash
 cd earlybird-ui
 npm install
 npm run dev
 ```
 
----
+Set `VITE_API_URL` so the frontend knows where the backend is. Create `earlybird-ui/.env.local`:
 
-## Quickstart
-
-### 1. Clone
-
-```bash
-git clone https://github.com/anishkask/EarlyBird.git
-cd EarlyBird
+```
+VITE_API_URL=http://localhost:8000
 ```
 
-### 2. Install dependencies
+If `VITE_API_URL` is not set, the frontend defaults to `http://localhost:8000`.
+
+## CLI usage
+
+The CLI behaves exactly as before and still writes Excel locally.
 
 ```bash
-pip install -r requirements.txt
+# Standard run, last 72 hours
+python job_pipeline_full.py
+
+# Fresh only
+python job_pipeline_full.py --hours 24
+
+# Scrape only, skip all Claude API calls
+python job_pipeline_full.py --scrape-only
 ```
 
-### 3. Configure environment
+Configure the CLI through `.env`:
 
 ```bash
 cp .env.example .env
 ```
-
-Fill in `.env`:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
@@ -77,119 +119,82 @@ YOUR_LINKEDIN=https://linkedin.com/in/yourhandle
 MY_BACKGROUND=Brief summary of your skills and experience
 ```
 
-### 4. Run
+## API endpoints
 
-```bash
-# Standard run — last 72 hours
-python job_pipeline_full.py
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| GET | `/health` | Liveness check. Returns `{"status":"ok"}` |
+| POST | `/run-pipeline` | Starts a run. Body includes `anthropic_api_key`, `hours`, `cold_outreach`, `cold_outreach_limit`. Returns `run_id` |
+| GET | `/status/{run_id}` | Returns the run status: queued, running, complete, or error |
+| GET | `/results/{run_id}` | Returns the full results JSON once the run is complete |
+| POST | `/settings` | Validates preferences for the session. Nothing is persisted |
 
-# Fresh only
-python job_pipeline_full.py --hours 24
+## Deployment
 
-# Include cold outreach (campus recruiter research)
-python job_pipeline_full.py --hours 72 --cold-outreach
+The frontend is hosted on Vercel and the backend on Render. Both deploy from the `main` branch.
 
-# Skip email sending
-python job_pipeline_full.py --no-email
+### Backend (Render)
 
-# Scrape only, skip all Claude API calls
-python job_pipeline_full.py --scrape-only
-```
+The backend is defined in `render.yaml`. To create the service the first time:
 
----
+1. On Render, choose New, then Web Service, and connect this repository.
+2. Branch: `main`. Build command: `pip install -r requirements.txt`. Start command: `uvicorn api:app --host 0.0.0.0 --port $PORT`.
+3. Choose the free instance type and create the service.
+4. Copy the resulting URL, for example `https://earlybird-api.onrender.com`.
 
-## How It Works
+### Frontend (Vercel)
 
-1. Scrapes Greenhouse and Lever ATS boards using their public APIs
-2. Aggregates LinkedIn and Indeed via JobSpy
-3. Filters to US/remote only, deduplicates by company + title
-4. For each fresh job (under 96h), calls Claude API with web search enabled to find real recruiter contacts
-5. Drafts a LinkedIn message and email per contact using your background
-6. Optionally runs cold outreach: searches for campus recruiters at all companies in your watchlist, even those with no current openings
-7. Writes everything to a timestamped Excel file with three tabs: Jobs, Outreach, Cold Outreach
+1. The Vercel project root directory is `earlybird-ui`.
+2. Add an environment variable `VITE_API_URL` set to the Render backend URL.
+3. Vercel builds with `npm run build` and serves the `dist` output.
 
----
+## Redeploying
 
-## Excel Output
+### Redeploy the frontend
 
-**Jobs tab** — color-coded by posting age, with apply links and match scores
+Vercel rebuilds automatically on every push to `main`. To trigger a deploy manually instead:
 
-**Outreach tab** — contact name, title, LinkedIn URL, drafted message and email, plus:
-- Company Domain (extracted from apply link)
-- Apollo Lookup (clickable link to search contacts by domain)
-- Email Pattern (blank column for manual entry)
+- From the dashboard: open the Vercel project, go to Deployments, open the most recent deployment menu, and choose Redeploy.
+- From the CLI: `cd earlybird-ui && npx vercel --prod`.
 
-**Cold Outreach tab** — same structure, for proactive outreach at companies with no current openings
+If you change `VITE_API_URL`, redeploy afterward so the new value is baked into the build.
 
----
+### Redeploy the backend
 
-## Web Search Confirmation
+`render.yaml` sets `autoDeploy: false`, so pushing to `main` does not deploy on its own. To deploy the latest commit:
 
-Every run prints:
+- From the dashboard: open the `earlybird-api` service, choose Manual Deploy, then Deploy latest commit.
+- To deploy on every push instead, set `autoDeploy: true` in `render.yaml` or enable auto-deploy in the service settings.
 
-```
-Tool-use blocks in Claude API responses: N
-```
-
-If N is 0, web search is not being invoked. If N > 0, real-time recruiter search is working. Each web search call uses approximately 10k tokens, so the free API tier (30k tokens/min) processes about 3 companies per minute.
-
----
-
-## Automating Daily Runs
-
-### Windows (Task Scheduler)
-
-Create `run_earlybird.bat`:
-
-```bat
-@echo off
-cd C:\path\to\EarlyBird
-python job_pipeline_full.py --hours 24 >> logs\pipeline_log.txt 2>&1
-```
-
-Set a daily trigger at 8 AM in Task Scheduler.
-
-### Mac / Linux (cron)
-
-```bash
-crontab -e
-# Add:
-0 8 * * * cd /path/to/EarlyBird && python job_pipeline_full.py --hours 24 >> logs/pipeline_log.txt 2>&1
-```
-
----
+After a backend redeploy, confirm it is healthy by opening `https://YOUR-RENDER-URL/health`.
 
 ## Stack
 
-**Pipeline**
-- Python 3.10+
-- [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python) with `web_search_20250305` tool
+Pipeline and backend:
+
+- Python 3.10 or newer
+- FastAPI and Uvicorn
+- [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python) with the `web_search_20250305` tool
 - [JobSpy](https://github.com/cullenwatson/JobSpy) for LinkedIn and Indeed
 - openpyxl, BeautifulSoup, requests, python-dotenv
 
-**Dashboard**
-- React + Vite
-- Tailwind CSS v3
-- Deployed on Vercel
+Frontend:
 
----
+- React and Vite
+- Tailwind CSS v3
+- Hosted on Vercel
 
 ## Notes
 
 - LinkedIn and Indeed scraping via JobSpy may conflict with their terms of service. Run at most once per day.
-- Never commit `.env`, `token.json`, `credentials.json`, or `*.xlsx` files — all are in `.gitignore`.
-- The `--cold-outreach` flag spaces API calls 22 seconds apart to avoid rate limits. For 10 companies expect about 4 minutes.
-
----
+- Never commit `.env`, `token.json`, `credentials.json`, or `*.xlsx` files. All are listed in `.gitignore`.
+- The Render free tier sleeps after a period of inactivity. The first request after it sleeps takes around 30 seconds to wake the service.
 
 ## Roadmap
 
-- Connect dashboard to live pipeline output (FastAPI backend)
 - Resume-to-job matching using embeddings
-- Slack digest summarizing each morning's run
+- Daily digest summarizing each morning's run
 - Handshake integration for student-exclusive postings
-
----
 
 ## License
 
