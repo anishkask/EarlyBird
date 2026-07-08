@@ -2,9 +2,9 @@
 
 > Apply before everyone else does.
 
-EarlyBird is a job search automation tool for students and early-career engineers who want to apply to roles within hours of posting, before listings hit mass job boards and inboxes flood with applicants.
+EarlyBird is a job search automation tool for engineers who want to see fresh paid roles within hours of posting, before listings hit mass job boards and inboxes flood with applicants. It targets full-time, contract, and contract-to-hire roles in the AI/ML and full-stack space.
 
-It polls company ATS systems (Greenhouse and Lever), runs live web searches for recruiters and founders, drafts personalized outreach messages, and presents everything in a React dashboard backed by a FastAPI server. It also runs as a standalone CLI that writes a color-coded Excel tracker.
+It polls company ATS systems (Greenhouse, Lever, Ashby) for a config-driven watchlist plus the RemoteOK board, ranks roles by freshness and profile match, drafts a short outreach message for the top results using the Claude API with live web search, and writes a color-coded Excel tracker. It also runs behind a FastAPI server with a React dashboard.
 
 ## Architecture
 
@@ -18,15 +18,16 @@ Live site: [earlybird-ashen.vercel.app](https://earlybird-ashen.vercel.app)
 
 ## Features
 
-- Scrapes Greenhouse, Lever, LinkedIn, Indeed, and Wellfound within hours of posting
-- Dynamic ATS discovery: finds and verifies company job boards in real time instead of relying on a fixed company list
-- Filters by US location and remote, removing international noise
-- Deduplicates across sources so the same role never appears twice
-- Uses the Claude API with live web search to find real recruiters and founders by name
-- Drafts a LinkedIn message per contact that you review and send manually
-- Cold outreach: researches founders and CEOs at VC portfolio companies, even those with no open roles
-- Apollo lookup links and company domain columns for email pattern discovery
-- CLI still generates a color-coded Excel file: green for posted under 6h, blue for under 24h, yellow for under 48h
+- Pulls from stable, terms-respecting endpoints only: Greenhouse, Lever, and Ashby ATS JSON APIs, plus the RemoteOK JSON board
+- Targets paid roles (full-time, contract, contract-to-hire) and filters internships out by default
+- Detects and deprioritizes roles that require a conferred degree, without ever filtering on visa sponsorship
+- Ranks every role by freshness, profile keyword match, and paid role type, then dedupes across sources
+- Flags urgency: roles under 1 hour old are highlighted red, under 6 hours green
+- For the top ranked roles, researches a likely outreach contact with the Claude API (live web search) and drafts a short tailored message
+- Sources, target companies, keywords, and filters are all controlled from a single `config.py`
+- Fast `--fresh` mode for frequent polling so you see new roles first
+- Color-coded Excel tracker with apply links, posting age, rank, and role type
+- LinkedIn and Indeed scraping is removed from the default run (anti-bot fragility and terms conflicts); it remains behind a config flag, off by default
 
 ## Using the live site
 
@@ -38,17 +39,39 @@ Live site: [earlybird-ashen.vercel.app](https://earlybird-ashen.vercel.app)
 
 A run takes roughly 3 to 5 minutes depending on how many companies have fresh postings.
 
-## Dynamic ATS discovery
+## Configuration
 
-Instead of a hardcoded company list, `build_dynamic_watchlist()` builds the watchlist on every run:
+Everything you tune lives in `config.py`, so you never edit core logic. Nothing personal or secret belongs here (see note below).
 
-1. Reads `data/cold_outreach_cache.json`, which accumulates companies discovered by VC portfolio scraping.
-2. For each company, constructs candidate slugs and checks live Greenhouse and Lever endpoints with a short timeout.
-3. Keeps companies whose boards return an active, non-empty jobs list.
-4. Caches verified slugs in `watchlist_cache.json` and reuses the cache for a week before re-verifying.
-5. Also pulls additional companies from real-time sources such as YC Work at a Startup and Wellfound.
+Relevance and sources:
+- `PROFILE_KEYWORDS`: keywords that define relevance and drive ranking (high, core, and adjacent tiers).
+- `SOURCES`: turn each source on or off. Greenhouse, Lever, Ashby, and RemoteOK are on by default; Wellfound and JobSpy (LinkedIn/Indeed) are off.
+- `WATCHLIST`: target companies as `{name, ats_type, slug}` (Greenhouse/Lever). Slugs that no longer resolve are skipped gracefully.
+- `ASHBY_COMPANIES`: Ashby board slugs (Ashby skews to startups).
 
-The watchlist grows as cold outreach discovers more companies, and shrinks as companies stop posting.
+Role and seniority filters (tune to your own level):
+- `SENIORITY_EXCLUDE`: title terms to drop (default excludes staff/principal/lead/senior/manager/director and similar).
+- `MAX_YEARS`: drop roles whose description requires at least this many years of experience.
+- `ENTRY_MID_SIGNALS`: title terms that mark an entry/mid role, used for a ranking bonus.
+- `FUNCTION_EXCLUDE`: off-target functions to drop (default excludes security, IT, SRE, hardware, data science, sales/solutions engineering, and similar).
+- `INCLUDE_INTERNSHIPS`, `DEGREE_REQUIREMENT_MODE`, `REMOTE_OK`.
+
+Company targeting:
+- `EXCLUDE_COMPANIES`: companies to drop entirely (matched as a lowercase substring of the company name).
+- `LARGE_BOARD_THRESHOLD` / `SMALL_BOARD_THRESHOLD`: a company-size proxy based on how many roles its ATS board lists. Small boards get a ranking bonus, large boards a penalty.
+
+Run tuning:
+- `DEFAULT_HOURS`, `FRESH_HOURS`, `OUTREACH_TOP_N`.
+
+Ranking is attainability-aware: it rewards entry/mid level, smaller companies, stack-keyword match, and freshness, and penalizes high seniority and large or excluded companies.
+
+Secrets and personal identity stay in `.env` and never go in `config.py`. Your name, background, and API keys are read from environment variables at runtime, so nothing identifying is committed to the repo.
+
+### Watchlist and discovery
+
+The watchlist is `config.WATCHLIST` plus any companies confirmed by discovery. On a full run, EarlyBird verifies company names from the cold-outreach cache against live Greenhouse and Lever endpoints and stores the confirmed ones in `watchlist_cache.json` for future runs. Loading the watchlist never makes network calls, so runs start instantly.
+
+Note on stable endpoints: ai-jobs.net exposes no stable public feed, so it is intentionally not integrated. RemoteOK covers AI-board listings through its documented JSON API instead.
 
 ## Security
 
@@ -91,20 +114,31 @@ If `VITE_API_URL` is not set, the frontend defaults to `http://localhost:8000`.
 
 ## CLI usage
 
-The CLI behaves exactly as before and still writes Excel locally.
+The CLI writes a color-coded Excel tracker locally.
 
 ```bash
-# Standard run, last 72 hours
+# Standard run (config.DEFAULT_HOURS lookback), with outreach drafting
 python job_pipeline_full.py
 
-# Fresh only
+# Fast poll: short window (config.FRESH_HOURS), scrape and Excel only, no Claude calls
+python job_pipeline_full.py --fresh
+
+# Custom lookback window
 python job_pipeline_full.py --hours 24
 
-# Scrape only, skip all Claude API calls
+# Scrape and write Excel only, skip all Claude API calls
 python job_pipeline_full.py --scrape-only
 ```
 
-Configure the CLI through `.env`:
+Run modes at a glance:
+
+| Mode | Sources | Outreach drafting | Speed |
+| ---- | ------- | ----------------- | ----- |
+| `--fresh` | ATS + RemoteOK | no | fastest, for frequent polling |
+| `--scrape-only` | ATS + RemoteOK | no | fast, no API key needed |
+| standard | ATS + RemoteOK | yes (top `OUTREACH_TOP_N`) | slower, needs a funded key |
+
+Secrets and identity go in `.env`:
 
 ```bash
 cp .env.example .env
@@ -114,10 +148,11 @@ cp .env.example .env
 ANTHROPIC_API_KEY=sk-ant-...
 YOUR_NAME=Your Name
 YOUR_EMAIL=you@email.com
-YOUR_SCHOOL=Your University
 YOUR_LINKEDIN=https://linkedin.com/in/yourhandle
 MY_BACKGROUND=Brief summary of your skills and experience
 ```
+
+Outreach is draft-only. EarlyBird never sends email on your behalf.
 
 ## API endpoints
 
@@ -175,8 +210,8 @@ Pipeline and backend:
 - Python 3.10 or newer
 - FastAPI and Uvicorn
 - [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python) with the `web_search_20250305` tool
-- [JobSpy](https://github.com/cullenwatson/JobSpy) for LinkedIn and Indeed
 - openpyxl, BeautifulSoup, requests, python-dotenv
+- [JobSpy](https://github.com/cullenwatson/JobSpy) is an optional, disabled-by-default source for LinkedIn and Indeed
 
 Frontend:
 
@@ -184,9 +219,33 @@ Frontend:
 - Tailwind CSS v3
 - Hosted on Vercel
 
+## Scheduling
+
+For speed-to-first-sight, poll frequently with the fast `--fresh` mode. It needs no API key and skips outreach.
+
+Windows (Task Scheduler), `run_earlybird.bat`:
+
+```bat
+@echo off
+cd C:\path\to\EarlyBird
+python job_pipeline_full.py --fresh >> logs\pipeline_log.txt 2>&1
+```
+
+Add a trigger that runs it every few hours. Run the standard mode (with outreach) once a day.
+
+Mac / Linux (cron):
+
+```bash
+crontab -e
+# Fast poll every 2 hours:
+0 */2 * * * cd /path/to/EarlyBird && python job_pipeline_full.py --fresh >> logs/pipeline_log.txt 2>&1
+# Full run with outreach each morning at 8:
+0 8 * * * cd /path/to/EarlyBird && python job_pipeline_full.py >> logs/pipeline_log.txt 2>&1
+```
+
 ## Notes
 
-- LinkedIn and Indeed scraping via JobSpy may conflict with their terms of service. Run at most once per day.
+- LinkedIn and Indeed scraping (JobSpy) is off by default because it breaks on anti-bot measures and conflicts with those sites' terms. Enabling it in `config.py` is at your own discretion.
 - Never commit `.env`, `token.json`, `credentials.json`, or `*.xlsx` files. All are listed in `.gitignore`.
 - The Render free tier sleeps after a period of inactivity. The first request after it sleeps takes around 30 seconds to wake the service.
 
@@ -194,7 +253,7 @@ Frontend:
 
 - Resume-to-job matching using embeddings
 - Daily digest summarizing each morning's run
-- Handshake integration for student-exclusive postings
+- Wider default watchlist and Ashby coverage
 
 ## License
 

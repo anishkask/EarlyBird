@@ -40,75 +40,198 @@ MY_BACKGROUND  = os.getenv("MY_BACKGROUND", "")
 EMAIL_DELAY_MIN = int(os.getenv("EMAIL_DELAY_MIN", "120"))
 EMAIL_DELAY_MAX = int(os.getenv("EMAIL_DELAY_MAX", "300"))
 
-# === Dynamic Company Loading ===
-# Companies are loaded from companies.json (updated weekly via funding_pull.py)
-# with a fallback list of known companies in case the dynamic list fails.
+# === Dynamic ATS Discovery ===
+# Bootstrap set of known companies with confirmed ATS — used as seed for discovery
+# and fallback when the dynamic watchlist cannot be built.
 
-COMPANIES_CACHE_FILE = "companies.json"
-COMPANIES_CACHE_MAX_AGE_DAYS = 7
-
-# Fallback list: 10 known companies with confirmed ATS (used if companies.json unavailable)
 FALLBACK_COMPANIES = [
-    {"name": "Airbnb", "website": "https://www.airbnb.com", "ats_type": "greenhouse", "slug": "airbnb"},
-    {"name": "Brex", "website": "https://www.brex.com", "ats_type": "greenhouse", "slug": "brex"},
-    {"name": "Coinbase", "website": "https://www.coinbase.com", "ats_type": "lever", "slug": "coinbase"},
-    {"name": "Notion", "website": "https://www.notion.so", "ats_type": "greenhouse", "slug": "notion"},
-    {"name": "Vercel", "website": "https://vercel.com", "ats_type": "lever", "slug": "vercel"},
-    {"name": "Linear", "website": "https://linear.app", "ats_type": "lever", "slug": "linear"},
-    {"name": "Retool", "website": "https://retool.com", "ats_type": "lever", "slug": "retool"},
-    {"name": "Glydways", "website": "https://www.glydways.com", "ats_type": "greenhouse", "slug": "glydways"},
-    {"name": "Monarch Money", "website": "https://www.monarchmoney.com", "ats_type": "greenhouse", "slug": "monarchmoney"},
-    {"name": "Eulerity", "website": "https://eulerity.com", "ats_type": "greenhouse", "slug": "eulerity"},
+    {"name": "Airbnb",        "website": "https://www.airbnb.com",        "ats_type": "greenhouse", "slug": "airbnb"},
+    {"name": "Brex",          "website": "https://www.brex.com",          "ats_type": "greenhouse", "slug": "brex"},
+    {"name": "Coinbase",      "website": "https://www.coinbase.com",      "ats_type": "lever",      "slug": "coinbase"},
+    {"name": "Notion",        "website": "https://www.notion.so",         "ats_type": "greenhouse", "slug": "notion"},
+    {"name": "Vercel",        "website": "https://vercel.com",            "ats_type": "lever",      "slug": "vercel"},
+    {"name": "Linear",        "website": "https://linear.app",            "ats_type": "lever",      "slug": "linear"},
+    {"name": "Retool",        "website": "https://retool.com",            "ats_type": "lever",      "slug": "retool"},
+    {"name": "Glydways",      "website": "https://www.glydways.com",      "ats_type": "greenhouse", "slug": "glydways"},
+    {"name": "Monarch Money", "website": "https://www.monarchmoney.com",  "ats_type": "greenhouse", "slug": "monarchmoney"},
+    {"name": "Eulerity",      "website": "https://eulerity.com",          "ats_type": "greenhouse", "slug": "eulerity"},
 ]
 
-def load_companies():
-    """
-    Load companies from companies.json cache.
-    Returns list of company dicts with: name, website, ats_type, slug
-    Automatically refreshes if cache is > 7 days old.
-    Falls back to hardcoded list if cache unavailable.
-    """
-    # Check if we need to refresh the cache
-    if Path(COMPANIES_CACHE_FILE).exists():
-        file_age_seconds = time.time() - Path(COMPANIES_CACHE_FILE).stat().st_mtime
-        file_age_days = file_age_seconds / (24 * 3600)
-        
-        if file_age_days > COMPANIES_CACHE_MAX_AGE_DAYS:
-            print(f"  [STALE] companies.json is {file_age_days:.1f} days old (threshold: {COMPANIES_CACHE_MAX_AGE_DAYS} days)")
-            print(f"  [REFRESH] Running funding_pull.py to refresh company list...")
-            try:
-                import subprocess
-                result = subprocess.run(
-                    [sys.executable, "funding_pull.py"],
-                    capture_output=True,
-                    text=True,
-                    timeout=60
-                )
-                if result.returncode == 0:
-                    print(f"  [SUCCESS] Company list updated successfully")
-                else:
-                    print(f"  [WARNING] funding_pull.py failed, using cached list")
-            except Exception as e:
-                print(f"  [WARNING] Could not run funding_pull.py: {e}")
-    
-    # Load from cache file if it exists
-    if Path(COMPANIES_CACHE_FILE).exists():
-        try:
-            with open(COMPANIES_CACHE_FILE, "r") as f:
-                data = json.load(f)
-                companies = data.get("companies", [])
-                if companies:
-                    print(f"  [LOADED] {len(companies)} companies from cache")
-                    return companies
-        except Exception as e:
-            print(f"  [WARNING] Could not read companies.json: {e}")
-    
-    # Fall back to hardcoded list
-    print(f"  [FALLBACK] Using fallback list ({len(FALLBACK_COMPANIES)} companies)")
-    return FALLBACK_COMPANIES
+WATCHLIST_CACHE_FILE = "watchlist_cache.json"
+WATCHLIST_CACHE_MAX_DAYS = 7
+CO_OUTREACH_CACHE = Path("data") / "cold_outreach_cache.json"
 
-# Load companies on startup
-COMPANIES = load_companies()
+
+def _ats_slugs_from_name(name: str) -> list:
+    """Generate ATS slug candidates from a company name."""
+    base = re.sub(r"[^a-z0-9\s-]", "", name.lower()).strip()
+    hyphenated = re.sub(r"\s+", "-", base)
+    no_space   = re.sub(r"\s+", "",  base)
+    first_word = base.split()[0] if base.split() else base
+    return list(dict.fromkeys([hyphenated, no_space, first_word]))  # unique, ordered
+
+
+def _check_greenhouse(slug: str) -> bool:
+    try:
+        r = requests.get(
+            f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs",
+            headers=HEADERS, timeout=3,
+        )
+        return r.status_code == 200 and bool(r.json().get("jobs"))
+    except Exception:
+        return False
+
+
+def _check_lever(slug: str) -> bool:
+    try:
+        r = requests.get(
+            f"https://api.lever.co/v0/postings/{slug}?mode=json",
+            headers=HEADERS, timeout=3,
+        )
+        return r.status_code == 200 and isinstance(r.json(), list) and bool(r.json())
+    except Exception:
+        return False
+
+
+def build_dynamic_watchlist() -> list:
+    """
+    Build a dynamic list of companies with active Greenhouse or Lever boards.
+    Uses a 7-day cache (watchlist_cache.json) to avoid re-checking every run.
+    Seeds candidates from cold_outreach_cache.json (VC portfolio discoveries)
+    plus the bootstrap FALLBACK_COMPANIES list.
+    Also polls YC Work at a Startup and Wellfound for additional companies.
+    Returns list of dicts: {name, website, ats_type, slug}
+    """
+    # 1. Return cache if fresh
+    if Path(WATCHLIST_CACHE_FILE).exists():
+        age_days = (time.time() - Path(WATCHLIST_CACHE_FILE).stat().st_mtime) / 86400
+        if age_days < WATCHLIST_CACHE_MAX_DAYS:
+            try:
+                with open(WATCHLIST_CACHE_FILE) as f:
+                    cached = json.load(f)
+                companies = cached.get("companies", [])
+                if companies:
+                    n_gh = sum(1 for c in companies if c.get("ats_type") == "greenhouse")
+                    n_lv = sum(1 for c in companies if c.get("ats_type") == "lever")
+                    print(f"Dynamic watchlist built: {n_gh} Greenhouse companies, {n_lv} Lever companies, 0 from real-time sources (cached)")
+                    return companies
+            except Exception as e:
+                print(f"  [WARNING] Could not read watchlist cache: {e}")
+
+    print("  Building dynamic watchlist (checking ATS endpoints)...")
+
+    # 2. Collect candidates from cold_outreach_cache.json + fallback list
+    candidates: list[dict] = []
+    if CO_OUTREACH_CACHE.exists():
+        try:
+            with open(CO_OUTREACH_CACHE) as f:
+                data = json.load(f)
+            for c in data.get("companies", []):
+                if c.get("name"):
+                    candidates.append({"name": c["name"], "website": c.get("website", "")})
+        except Exception as e:
+            print(f"  [WARNING] Could not read cold_outreach_cache.json: {e}")
+
+    for c in FALLBACK_COMPANIES:
+        candidates.append({"name": c["name"], "website": c["website"]})
+
+    # 3. Check Greenhouse and Lever for each candidate
+    verified: list[dict] = []
+    seen_slugs: set = set()
+
+    for cand in candidates:
+        name = cand.get("name", "")
+        if not name:
+            continue
+        slugs = _ats_slugs_from_name(name)
+        found = False
+        for slug in slugs:
+            if slug in seen_slugs or not slug:
+                continue
+            if _check_greenhouse(slug):
+                seen_slugs.add(slug)
+                verified.append({"name": name, "website": cand.get("website", ""), "ats_type": "greenhouse", "slug": slug})
+                found = True
+                break
+            if _check_lever(slug):
+                seen_slugs.add(slug)
+                verified.append({"name": name, "website": cand.get("website", ""), "ats_type": "lever", "slug": slug})
+                found = True
+                break
+        _ = found  # not used further
+
+    # 4. Real-time sources
+    rt_count = 0
+
+    # YC Work at a Startup
+    try:
+        r = requests.get(
+            "https://www.workatastartup.com/jobs?role=eng&usa_only=true",
+            headers=HEADERS, timeout=10,
+        )
+        soup = BeautifulSoup(r.text, "html.parser")
+        for link in soup.find_all("a", href=True)[:120]:
+            href = str(link.get("href", ""))
+            text = link.get_text(strip=True)
+            if "workatastartup.com/companies/" in href and text and 2 <= len(text) <= 60:
+                for slug in _ats_slugs_from_name(text)[:2]:
+                    if slug in seen_slugs:
+                        continue
+                    if _check_greenhouse(slug):
+                        seen_slugs.add(slug)
+                        verified.append({"name": text, "website": href, "ats_type": "greenhouse", "slug": slug})
+                        rt_count += 1
+                        break
+                    if _check_lever(slug):
+                        seen_slugs.add(slug)
+                        verified.append({"name": text, "website": href, "ats_type": "lever", "slug": slug})
+                        rt_count += 1
+                        break
+    except Exception as e:
+        print(f"  [WARNING] YC Work at a Startup scrape failed: {e}")
+
+    # Wellfound
+    try:
+        r = requests.get(
+            "https://wellfound.com/jobs?role=software-engineer&remote=true",
+            headers=HEADERS, timeout=10,
+        )
+        soup = BeautifulSoup(r.text, "html.parser")
+        for tag in soup.find_all(class_=re.compile("company", re.I))[:60]:
+            text = tag.get_text(strip=True)
+            if not text or len(text) < 2 or len(text) > 60:
+                continue
+            for slug in _ats_slugs_from_name(text)[:1]:
+                if slug in seen_slugs:
+                    continue
+                if _check_greenhouse(slug):
+                    seen_slugs.add(slug)
+                    verified.append({"name": text, "website": "", "ats_type": "greenhouse", "slug": slug})
+                    rt_count += 1
+                    break
+    except Exception as e:
+        print(f"  [WARNING] Wellfound scrape failed: {e}")
+
+    # 5. Fall back to bootstrap list if discovery returned nothing
+    if not verified:
+        print(f"  [FALLBACK] Dynamic discovery found no companies — using fallback list")
+        return FALLBACK_COMPANIES
+
+    # 6. Cache and report
+    n_gh = sum(1 for c in verified if c.get("ats_type") == "greenhouse")
+    n_lv = sum(1 for c in verified if c.get("ats_type") == "lever")
+    try:
+        with open(WATCHLIST_CACHE_FILE, "w") as f:
+            json.dump({"companies": verified, "built_at": datetime.now().isoformat()}, f, indent=2)
+    except Exception as e:
+        print(f"  [WARNING] Could not save watchlist_cache.json: {e}")
+
+    print(f"Dynamic watchlist built: {n_gh} Greenhouse companies, {n_lv} Lever companies, {rt_count} from real-time sources")
+    return verified
+
+
+# Build dynamic watchlist on startup (uses cache when available — fast path)
+COMPANIES = build_dynamic_watchlist()
 
 # Extract ATS-specific lists for backward compatibility with scrape functions
 GREENHOUSE_SLUGS = [c["slug"] for c in COMPANIES if c.get("ats_type") == "greenhouse"]
@@ -577,6 +700,135 @@ def write_excel(jobs,outreach):
     # NOTE: caller is responsible for wb.save(fname) so that the Cold Outreach
     # module can append its sheet before the file is written to disk.
     return fname, wb
+
+def run_pipeline_api(
+    api_key: str,
+    hours: int = 72,
+    cold_outreach_enabled: bool = True,
+    cold_outreach_limit: int = 10,
+) -> dict:
+    """
+    Run the full pipeline and return structured JSON results.
+    Called by api.py for each user-initiated run.
+    The API key is used only for the duration of this call and never written to disk.
+    """
+    import anthropic
+    client = anthropic.Anthropic(api_key=api_key)
+
+    print(f"\n{'='*60}")
+    print(f"  Pipeline run — {datetime.now().strftime('%Y-%m-%d %H:%M')} ({hours}h window)")
+    print(f"{'='*60}\n")
+
+    # --- Scraping ---
+    all_jobs: list = []
+    for label, fn, kw in [
+        ("Greenhouse ATS",    scrape_greenhouse, {"max_h": hours}),
+        ("Lever ATS",         scrape_lever,      {"max_h": hours}),
+        ("Ashby/YC startups", scrape_ashby,      {"max_h": hours}),
+        ("Wellfound",         scrape_wellfound,  {}),
+        ("LinkedIn/Indeed",   scrape_jobspy,     {"max_h": hours}),
+    ]:
+        print(f"Scraping {label}...")
+        found = fn(**kw)
+        print(f"  {len(found)} internships found")
+        all_jobs.extend(found)
+
+    # --- Filtering ---
+    PA_CITIES = ["philadelphia", "exton", "hatfield", "king of prussia", "malvern", "wayne", "conshohocken"]
+
+    def _is_usa(loc):
+        if not loc or not isinstance(loc, str):
+            return False
+        s = loc.lower()
+        non_us = ["dublin", "luxembourg", "bengaluru", "toronto", "canada", "india", "brazil",
+                  "ireland", "germany", "uk", "united kingdom", "france", "europe", "singapore",
+                  "australia", "china", "japan", "hong kong", "mexico"]
+        if any(x in s for x in non_us):
+            return False
+        if any(c in s for c in PA_CITIES) or re.search(r",?\s*pa(\s|$|,)", s):
+            return True
+        if re.fullmatch(r"\s*remote\s*", s) or re.fullmatch(r"\s*united states\s*", s):
+            return True
+        if "remote" in s and not any(x in s for x in non_us):
+            return True
+        if re.search(r"\busa\b|\bunited states\b|\bus\b", s) and not any(x in s for x in non_us):
+            return True
+        return False
+
+    all_jobs = [j for j in all_jobs if is_intern(j["title"]) and _is_usa(j.get("location", ""))]
+
+    seen: set = set()
+    deduped: list = []
+    for j in all_jobs:
+        key = (j["company"].lower().strip(), j["title"].lower().strip())
+        if key not in seen:
+            seen.add(key)
+            deduped.append(j)
+
+    all_jobs = sorted(deduped, key=lambda x: x.get("hours_ago", 999))
+    fresh = sum(1 for j in all_jobs if j.get("hours_ago", 999) <= 24)
+    print(f"\nTotal: {len(all_jobs)} unique internships | {fresh} posted in last 24h\n")
+
+    # --- Add score to each job ---
+    for j in all_jobs:
+        j["score"] = score(j["title"], j.get("description", ""))
+
+    # --- Outreach (contact research + message drafting) ---
+    outreach: list = []
+    fresh_jobs = [j for j in all_jobs if j.get("hours_ago", 999) <= 96]
+    print(f"Researching contacts for {min(len(fresh_jobs), 35)} jobs...\n")
+    for j in fresh_jobs[:35]:
+        co   = j.get("company", "")
+        role = j.get("title", "")
+        url  = j.get("job_url", "")
+        if not co or not role:
+            continue
+        print(f"  {co} — {role}")
+        contacts = find_contacts(co, role, client)
+        for c in contacts[:2]:
+            msgs = draft_messages(co, role, url, c, client)
+            outreach.append({
+                "company":     co,
+                "role":        role,
+                "name":        c.get("name", ""),
+                "title":       c.get("title", ""),
+                "reason":      c.get("reason", ""),
+                "linkedin_url": c.get("linkedin_search_url", ""),
+                "linkedin_msg": msgs.get("linkedin_message", ""),
+                "email":       c.get("guessed_email", ""),
+                "email_subj":  msgs.get("email_subject", ""),
+                "email_body":  msgs.get("email_body", ""),
+                "email_sent":  "",
+            })
+
+    # --- Cold Outreach ---
+    cold_contacts: list = []
+    if cold_outreach_enabled:
+        try:
+            from openpyxl import Workbook as _WB
+            from cold_outreach import run_cold_outreach, build_config as _co_cfg
+            co_config = _co_cfg()
+            co_config["cold_outreach_max_per_day"] = cold_outreach_limit
+            co_config["anthropic_api_key"] = api_key
+            dummy_wb = _WB()
+            cold_contacts = run_cold_outreach(dummy_wb, co_config, gmail_service=None)
+        except Exception as e:
+            print(f"WARNING: [Cold Outreach] {e}")
+
+    timestamp = datetime.utcnow().isoformat() + "Z"
+    return {
+        "jobs":          all_jobs,
+        "outreach":      outreach,
+        "cold_outreach": cold_contacts,
+        "summary": {
+            "total_jobs":          len(all_jobs),
+            "fresh_jobs":          fresh,
+            "outreach_count":      len(outreach),
+            "cold_outreach_count": len(cold_contacts),
+        },
+        "timestamp": timestamp,
+    }
+
 
 def main():
     p=argparse.ArgumentParser()

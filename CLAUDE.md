@@ -2,7 +2,7 @@
 
 ## What This Project Does
 
-EarlyBird is a Python-based job search automation pipeline built for a CS student (Temple University, graduating December 2026) looking for summer 2026 software engineering internships. It runs daily and does three things:
+EarlyBird is a Python-based job search automation pipeline built for a CS student looking for summer 2026 software engineering internships. It runs daily and does three things:
 
 1. **Job discovery** -- aggregates internship listings from multiple sources and surfaces them within hours of posting, before they reach mass job boards
 2. **Job outreach contacts** -- for each job found, researches real outreach contacts at that company using Claude API web search
@@ -66,7 +66,7 @@ All personal info lives in `.env`. Never hardcode any of these in the script.
 ```
 ANTHROPIC_API_KEY=        # required for contact research and cold outreach
 YOUR_NAME=
-YOUR_SCHOOL=Temple University
+YOUR_SCHOOL=
 YOUR_LINKEDIN=
 YOUR_PORTFOLIO=
 YOUR_GITHUB=
@@ -89,13 +89,13 @@ Jobs are filtered to keep only:
 - Pennsylvania locations: Philadelphia, Exton, Hatfield, King of Prussia, Malvern, Wayne, Conshohocken, Blue Bell, Newtown, Horsham, Lansdale, Collegeville, Berwyn, Paoli, Radnor, Villanova, Bryn Mawr, Media, West Chester, Norristown, Audubon, Oaks, or anywhere containing "PA" or "Pennsylvania"
 - Remote: location is blank, null, "Remote", "Anywhere", "United States", "USA", "US", "Work from home", "WFH"
 
-Filter OUT: any job with a specific non-PA city or non-US country (Dublin, London, Toronto, Bengaluru, Luxembourg, Warsaw, Sao Paulo, etc.)
+Filter OUT: any job with a specific non-US country (Dublin, London, Toronto, Bengaluru, Luxembourg, Warsaw, Sao Paulo, etc.)
 
 ---
 
 ## Role Filtering
 
-Keep roles where title contains: "intern", "internship", "co-op", "coop", "summer"
+Keep roles where title contains: "intern", "internship", "co-op", "coop", "summer", "fall"
 
 Filter OUT: "senior", "staff", "principal", "director", "manager", "lead", "VP", "head of" -- unless "intern" also appears in the title.
 
@@ -109,8 +109,6 @@ Filter OUT: "senior", "staff", "principal", "director", "manager", "lead", "VP",
 - Watchlist -- 80+ hardcoded company tokens/slugs (being replaced by dynamic funding pull)
 - VC portfolio boards: YC Work at a Startup, a16z, First Round Capital, Contrary Capital, Dreamit Ventures
 - Staffing firms: Robert Half, Theoris, TEKsystems, Apex Systems, Insight Global
-
-ZipRecruiter is permanently removed -- always returns 403.
 
 ---
 
@@ -142,7 +140,7 @@ for block in response.content:
 **Contact research priority order:**
 1. Campus recruiter or university recruiting contact
 2. Engineering recruiter or talent acquisition
-3. Alumni from Temple University at the company
+3. Alumni from your university at the company
 4. Senior engineer on the relevant team
 
 **Return only real information found via web search.** If a field is not found, leave it blank. Never hallucinate names, titles, or emails.
@@ -254,9 +252,9 @@ Key projects:
 - ReMo -- full-stack TypeScript/React + FastAPI/PostgreSQL, Google OAuth, real users, deployed
 - PasswordManager -- desktop app, team of 6, PyQt6, Agile
 
-Experience: Software Engineering Intern at Bourns Inc (June-August 2024) -- RPA automation, UiPath, Python, REST APIs, SAP, Agile
+Experience: Software Engineering Intern (2024) -- RPA automation, UiPath, Python, REST APIs, SAP, Agile
 
-School: Temple University, B.S. Computer Science
+School: stored in YOUR_SCHOOL env var
 
 Portfolio: stored in YOUR_PORTFOLIO env var
 GitHub: stored in YOUR_GITHUB env var

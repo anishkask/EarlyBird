@@ -1,808 +1,892 @@
 #!/usr/bin/env python3
 """
 ================================================================
-  Job Search Pipeline
-  Strategy: Find postings before 100 people apply.
+  EarlyBird - Job Search Pipeline
+  Strategy: surface fresh PAID roles before the applicant flood.
 ================================================================
-See full docstring in script for setup and usage.
-Run: python job_pipeline_full.py
-     python job_pipeline_full.py --no-email
-     python job_pipeline_full.py --hours 12
+
+Aggregates roles from stable, terms-respecting endpoints (Greenhouse, Lever,
+and Ashby ATS JSON APIs for a config-driven company watchlist, plus the
+RemoteOK JSON board), filters to relevant paid roles in the US/remote, ranks
+by freshness + profile keyword match + role type, dedupes across sources, and
+writes a color-coded Excel tracker. For the top-ranked roles it researches a
+likely outreach contact and drafts a short tailored message.
+
+Sources, target companies, keywords, and filters live in config.py.
+Secrets (API keys, identity) live in .env.
+
+Run modes:
+  python job_pipeline_full.py                 standard run (config.DEFAULT_HOURS)
+  python job_pipeline_full.py --hours 24      custom lookback window
+  python job_pipeline_full.py --fresh         fast poll: short window, no outreach
+  python job_pipeline_full.py --scrape-only   scrape + Excel only, no Claude calls
 """
 
 import os
 import sys
 import re
-import time
-import random
 import json
-import csv
+import time
 import argparse
 import warnings
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import quote_plus
+
 import requests
 from bs4 import BeautifulSoup
-import pandas as pd
 from dotenv import load_dotenv
-warnings.filterwarnings("ignore")
 
-# Load environment variables from .env file
+import config
+
+warnings.filterwarnings("ignore")
 load_dotenv()
 
-YOUR_NAME      = os.getenv("YOUR_NAME", "")
-YOUR_EMAIL     = os.getenv("YOUR_EMAIL", "")
-YOUR_SCHOOL    = os.getenv("YOUR_SCHOOL", "")
-YOUR_LINKEDIN  = os.getenv("YOUR_LINKEDIN", "")
-YOUR_GITHUB    = os.getenv("YOUR_GITHUB", "")
-YOUR_PORTFOLIO = os.getenv("YOUR_PORTFOLIO", "")
-MY_BACKGROUND  = os.getenv("MY_BACKGROUND", "")
-EMAIL_DELAY_MIN = int(os.getenv("EMAIL_DELAY_MIN", "120"))
-EMAIL_DELAY_MAX = int(os.getenv("EMAIL_DELAY_MAX", "300"))
+# --- Identity (from .env only; never hard-coded) ---
+YOUR_NAME     = os.getenv("YOUR_NAME", "")
+YOUR_EMAIL    = os.getenv("YOUR_EMAIL", "")
+YOUR_LINKEDIN = os.getenv("YOUR_LINKEDIN", "")
+MY_BACKGROUND = os.getenv("MY_BACKGROUND", "")
 
-# === Dynamic ATS Discovery ===
-# Bootstrap set of known companies with confirmed ATS — used as seed for discovery
-# and fallback when the dynamic watchlist cannot be built.
+# Windows consoles default to cp1252 and choke on non-ASCII; force UTF-8 so a
+# stray character can never crash a run. Prints themselves stay ASCII.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
-FALLBACK_COMPANIES = [
-    {"name": "Airbnb",        "website": "https://www.airbnb.com",        "ats_type": "greenhouse", "slug": "airbnb"},
-    {"name": "Brex",          "website": "https://www.brex.com",          "ats_type": "greenhouse", "slug": "brex"},
-    {"name": "Coinbase",      "website": "https://www.coinbase.com",      "ats_type": "lever",      "slug": "coinbase"},
-    {"name": "Notion",        "website": "https://www.notion.so",         "ats_type": "greenhouse", "slug": "notion"},
-    {"name": "Vercel",        "website": "https://vercel.com",            "ats_type": "lever",      "slug": "vercel"},
-    {"name": "Linear",        "website": "https://linear.app",            "ats_type": "lever",      "slug": "linear"},
-    {"name": "Retool",        "website": "https://retool.com",            "ats_type": "lever",      "slug": "retool"},
-    {"name": "Glydways",      "website": "https://www.glydways.com",      "ats_type": "greenhouse", "slug": "glydways"},
-    {"name": "Monarch Money", "website": "https://www.monarchmoney.com",  "ats_type": "greenhouse", "slug": "monarchmoney"},
-    {"name": "Eulerity",      "website": "https://eulerity.com",          "ats_type": "greenhouse", "slug": "eulerity"},
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+}
+
+OUTREACH_MODEL = "claude-sonnet-4-20250514"
+WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
+
+# ===========================================================================
+# Classification and ranking
+# ===========================================================================
+
+_ALL_KEYWORDS = (
+    config.PROFILE_KEYWORDS["high"]
+    + config.PROFILE_KEYWORDS["core"]
+    + config.PROFILE_KEYWORDS["bonus"]
+)
+
+# Cheap title-level pre-filter so scrapers skip obviously irrelevant roles
+# (sales, marketing, recruiting) before parsing descriptions.
+_TITLE_PREFILTER = [
+    "engineer", "developer", "software", "ml engineer", "machine learning",
+    " ai ", "ai/", "ai engineer", "full stack", "full-stack", "fullstack",
+    "backend", "back-end", "frontend", "front-end", "programmer", "llm",
 ]
 
-WATCHLIST_CACHE_FILE = "watchlist_cache.json"
-WATCHLIST_CACHE_MAX_DAYS = 7
-CO_OUTREACH_CACHE = Path("data") / "cold_outreach_cache.json"
+_NON_US = [
+    "dublin", "luxembourg", "bengaluru", "bangalore", "hyderabad", "warsaw",
+    "toronto", "vancouver", "canada", "india", "brazil", "ireland", "germany",
+    "united kingdom", "london", "france", "paris", "europe", "singapore",
+    "australia", "china", "japan", "hong kong", "mexico", "spain", "netherlands",
+    "amsterdam", "sweden", "switzerland", "zurich", "italy", "israel", "tel aviv",
+    "uae", "dubai", "new zealand", "south africa", "argentina", "colombia",
+    "poland", "romania", "portugal", "lisbon", "ukraine", "korea", "taiwan",
+    "philippines", "indonesia", "vietnam", "emea", "apac", "latam",
+]
+
+_DEGREE_RE = re.compile(
+    r"(bachelor'?s?\s+degree\s+(is\s+)?required"
+    r"|require[sd]?\s+(a\s+)?(bachelor|master|b\.?s\.?|b\.?a\.?|m\.?s\.?)\b"
+    r"|degree\s+(is\s+)?required"
+    r"|must\s+have\s+(a\s+)?(bachelor|master|degree)"
+    r"|\b(bs|ba|ms)\s+in\s+(computer|engineering))",
+    re.I,
+)
 
 
-def _ats_slugs_from_name(name: str) -> list:
-    """Generate ATS slug candidates from a company name."""
+def hours_ago(dt):
+    """Hours elapsed since datetime dt. Returns 999 if dt is None/invalid."""
+    if dt is None:
+        return 999
+    if not hasattr(dt, "astimezone"):
+        return 999
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    delta = datetime.now(timezone.utc) - dt
+    return int(delta.total_seconds() / 3600)
+
+
+def _title_maybe_relevant(title):
+    """Fast title-only gate used inside scrapers to bound description parsing."""
+    if not title:
+        return False
+    t = title.lower()
+    return any(k in t for k in _TITLE_PREFILTER)
+
+
+def is_relevant(title, desc=""):
+    """A role is relevant if any profile keyword appears in title or description."""
+    text = (title + " " + desc).lower()
+    return any(k in text for k in _ALL_KEYWORDS)
+
+
+def is_usa_location(loc):
+    """Keep US, remote, and unknown locations; drop clearly non-US ones."""
+    if not loc or not isinstance(loc, str):
+        return True  # unknown location -> keep (better recall)
+    s = loc.lower()
+    if any(x in s for x in _NON_US):
+        return False
+    return True
+
+
+def role_type(title, desc=""):
+    """Classify a role: intern, contract-to-hire, contract, or full-time."""
+    full = (title + " " + desc).lower()
+    t = title.lower()
+    if "intern" in full or "co-op" in full or "co op" in full:
+        return "intern"
+    if "contract to hire" in t or "contract-to-hire" in t or "c2h" in t or "contract-to-perm" in t:
+        return "contract-to-hire"
+    if any(k in t for k in ["contract", "contractor", "freelance", "temporary"]):
+        return "contract"
+    return "full-time"
+
+
+def requires_degree(title, desc=""):
+    """Best-effort detection of a conferred-degree requirement."""
+    return bool(_DEGREE_RE.search(title + " " + desc))
+
+
+_YEARS_EXP_RE = re.compile(
+    r"(\d{1,2})\s*\+?\s*years?(?:\s+of)?\s+(?:[a-z\-]+\s+){0,3}experience", re.I
+)
+
+_PLAIN_IC_TITLES = [
+    "software engineer", "full stack", "full-stack", "fullstack", "frontend",
+    "front end", "front-end", "backend", "back end", "back-end", "ai engineer",
+    "ml engineer", "machine learning engineer", "software developer", "web developer",
+]
+
+
+def years_required(text):
+    """Highest years-of-experience figure mentioned in the text, or 0."""
+    yrs = [int(m) for m in _YEARS_EXP_RE.findall(text or "")]
+    return max(yrs) if yrs else 0
+
+
+def is_excluded_seniority(title):
+    t = (title or "").lower()
+    return any(k in t for k in config.SENIORITY_EXCLUDE)
+
+
+def is_excluded_function(title):
+    t = (title or "").lower()
+    return any(k in t for k in config.FUNCTION_EXCLUDE)
+
+
+def is_excluded_company(company):
+    c = (company or "").lower()
+    return any(k in c for k in config.EXCLUDE_COMPANIES)
+
+
+def is_entry_mid(title):
+    t = (title or "").lower()
+    return any(k in t for k in config.ENTRY_MID_SIGNALS)
+
+
+def rank_score(j):
+    """
+    Attainability-aware ranking. Rewards entry/mid level + smaller company +
+    stack match + freshness; penalizes residual seniority and large boards.
+    A realistic small-company role outranks a fresh staff role at a unicorn.
+    """
+    title = j.get("title", "")
+    text = (title + " " + j.get("description", "")).lower()
+    s = 0.0
+
+    # Stack / profile keyword match
+    s += sum(3 for kw in config.PROFILE_KEYWORDS["high"] if kw in text)
+    s += sum(2 for kw in config.PROFILE_KEYWORDS["core"] if kw in text)
+    s += sum(1 for kw in config.PROFILE_KEYWORDS["bonus"] if kw in text)
+
+    # Freshness (reduced weight so it does not dominate attainability)
+    ha = j.get("hours_ago", 999)
+    if ha < 1:
+        s += 6
+    elif ha < 6:
+        s += 4
+    elif ha < 24:
+        s += 2
+    elif ha < 48:
+        s += 1
+
+    # Attainability: entry/mid level signal
+    if is_entry_mid(title):
+        s += 5
+    elif any(k in title.lower() for k in _PLAIN_IC_TITLES):
+        s += 3
+
+    # Company-size proxy: reward small boards, penalize large ones
+    bs = j.get("board_size")
+    if isinstance(bs, int):
+        if bs <= config.SMALL_BOARD_THRESHOLD:
+            s += 5
+        elif bs > config.LARGE_BOARD_THRESHOLD:
+            s -= 5
+
+    # Paid role type
+    rt = j.get("role_type", "full-time")
+    if rt in ("full-time", "contract-to-hire"):
+        s += 2
+    elif rt == "contract":
+        s += 1
+
+    # Penalties
+    if j.get("requires_degree") and config.DEGREE_REQUIREMENT_MODE == "deprioritize":
+        s -= 4
+    if is_excluded_seniority(title):  # should be filtered already; safety net
+        s -= 10
+    return round(s, 1)
+
+
+def fresh_flag(ha):
+    """Human urgency flag for the tracker."""
+    if ha < 1:
+        return "<1h!"
+    if ha < 6:
+        return "<6h"
+    return ""
+
+
+def job(title, company, location, url, dt, source, desc="", board_size=None):
+    ha = hours_ago(dt)
+    return {
+        "title": title, "company": company, "location": location,
+        "job_url": url, "hours_ago": ha, "source": source,
+        "description": (desc or "")[:600], "board_size": board_size,
+    }
+
+
+# ===========================================================================
+# Watchlist (config-driven, with optional cached discovery)
+# ===========================================================================
+
+def _ats_slugs_from_name(name):
+    """Generate candidate ATS slugs from a company name."""
     base = re.sub(r"[^a-z0-9\s-]", "", name.lower()).strip()
-    hyphenated = re.sub(r"\s+", "-", base)
-    no_space   = re.sub(r"\s+", "",  base)
-    first_word = base.split()[0] if base.split() else base
-    return list(dict.fromkeys([hyphenated, no_space, first_word]))  # unique, ordered
+    hyphen = re.sub(r"\s+", "-", base)
+    nospace = re.sub(r"\s+", "", base)
+    first = base.split()[0] if base.split() else base
+    return list(dict.fromkeys([s for s in (hyphen, nospace, first) if s]))
 
 
-def _check_greenhouse(slug: str) -> bool:
+def _check_greenhouse(slug):
     try:
         r = requests.get(
             f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs",
             headers=HEADERS, timeout=3,
         )
         return r.status_code == 200 and bool(r.json().get("jobs"))
-    except Exception:
+    except requests.RequestException:
         return False
 
 
-def _check_lever(slug: str) -> bool:
+def _check_lever(slug):
     try:
         r = requests.get(
             f"https://api.lever.co/v0/postings/{slug}?mode=json",
             headers=HEADERS, timeout=3,
         )
         return r.status_code == 200 and isinstance(r.json(), list) and bool(r.json())
+    except requests.RequestException:
+        return False
+
+
+def _load_discovered():
+    """Read cached, previously-verified discovered companies. No network."""
+    path = Path(config.WATCHLIST_CACHE_FILE)
+    if not path.exists():
+        return []
+    try:
+        return json.load(open(path, encoding="utf-8")).get("companies", [])
     except Exception:
-        return False
+        return []
 
 
-def build_dynamic_watchlist() -> list:
+def build_watchlist():
+    """Company watchlist = config.WATCHLIST plus any cached discoveries."""
+    companies = [dict(c) for c in config.WATCHLIST]
+    seen = {(c["ats_type"], c["slug"]) for c in companies}
+    for c in _load_discovered():
+        key = (c.get("ats_type"), c.get("slug"))
+        if c.get("slug") and key not in seen:
+            seen.add(key)
+            companies.append(c)
+    return companies
+
+
+def refresh_watchlist_cache():
     """
-    Build a dynamic list of companies with active Greenhouse or Lever boards.
-    Uses a 7-day cache (watchlist_cache.json) to avoid re-checking every run.
-    Seeds candidates from cold_outreach_cache.json (VC portfolio discoveries)
-    plus the bootstrap FALLBACK_COMPANIES list.
-    Also polls YC Work at a Startup and Wellfound for additional companies.
-    Returns list of dicts: {name, website, ats_type, slug}
+    Verify companies from the cold-outreach cache against Greenhouse/Lever and
+    persist the confirmed ones for future runs. Runs at the end of a full run;
+    failures never affect the current results.
     """
-    # 1. Return cache if fresh
-    if Path(WATCHLIST_CACHE_FILE).exists():
-        age_days = (time.time() - Path(WATCHLIST_CACHE_FILE).stat().st_mtime) / 86400
-        if age_days < WATCHLIST_CACHE_MAX_DAYS:
-            try:
-                with open(WATCHLIST_CACHE_FILE) as f:
-                    cached = json.load(f)
-                companies = cached.get("companies", [])
-                if companies:
-                    n_gh = sum(1 for c in companies if c.get("ats_type") == "greenhouse")
-                    n_lv = sum(1 for c in companies if c.get("ats_type") == "lever")
-                    print(f"Dynamic watchlist built: {n_gh} Greenhouse companies, {n_lv} Lever companies, 0 from real-time sources (cached)")
-                    return companies
-            except Exception as e:
-                print(f"  [WARNING] Could not read watchlist cache: {e}")
+    cold_cache = Path("data") / "cold_outreach_cache.json"
+    if not cold_cache.exists():
+        return
+    try:
+        names = [
+            c.get("name", "")
+            for c in json.load(open(cold_cache, encoding="utf-8")).get("companies", [])
+            if c.get("name")
+        ]
+    except Exception as e:
+        print(f"WARNING: could not read cold-outreach cache: {e}")
+        return
 
-    print("  Building dynamic watchlist (checking ATS endpoints)...")
-
-    # 2. Collect candidates from cold_outreach_cache.json + fallback list
-    candidates: list[dict] = []
-    if CO_OUTREACH_CACHE.exists():
-        try:
-            with open(CO_OUTREACH_CACHE) as f:
-                data = json.load(f)
-            for c in data.get("companies", []):
-                if c.get("name"):
-                    candidates.append({"name": c["name"], "website": c.get("website", "")})
-        except Exception as e:
-            print(f"  [WARNING] Could not read cold_outreach_cache.json: {e}")
-
-    for c in FALLBACK_COMPANIES:
-        candidates.append({"name": c["name"], "website": c["website"]})
-
-    # 3. Check Greenhouse and Lever for each candidate
-    verified: list[dict] = []
-    seen_slugs: set = set()
-
-    for cand in candidates:
-        name = cand.get("name", "")
-        if not name:
-            continue
-        slugs = _ats_slugs_from_name(name)
-        found = False
-        for slug in slugs:
-            if slug in seen_slugs or not slug:
-                continue
-            if _check_greenhouse(slug):
-                seen_slugs.add(slug)
-                verified.append({"name": name, "website": cand.get("website", ""), "ats_type": "greenhouse", "slug": slug})
-                found = True
+    existing = {(c["ats_type"], c["slug"]) for c in build_watchlist()}
+    verified = _load_discovered()
+    verified_keys = {(c.get("ats_type"), c.get("slug")) for c in verified}
+    added = 0
+    for name in names[:60]:  # bound the work
+        for slug in _ats_slugs_from_name(name)[:2]:
+            if _check_greenhouse(slug) and ("greenhouse", slug) not in existing:
+                verified.append({"name": name, "ats_type": "greenhouse", "slug": slug})
+                verified_keys.add(("greenhouse", slug))
+                added += 1
                 break
-            if _check_lever(slug):
-                seen_slugs.add(slug)
-                verified.append({"name": name, "website": cand.get("website", ""), "ats_type": "lever", "slug": slug})
-                found = True
+            if _check_lever(slug) and ("lever", slug) not in existing:
+                verified.append({"name": name, "ats_type": "lever", "slug": slug})
+                verified_keys.add(("lever", slug))
+                added += 1
                 break
-        _ = found  # not used further
-
-    # 4. Real-time sources
-    rt_count = 0
-
-    # YC Work at a Startup
     try:
-        r = requests.get(
-            "https://www.workatastartup.com/jobs?role=eng&usa_only=true",
-            headers=HEADERS, timeout=10,
+        json.dump(
+            {"companies": verified, "built_at": datetime.now().isoformat()},
+            open(config.WATCHLIST_CACHE_FILE, "w", encoding="utf-8"),
+            indent=2,
         )
-        soup = BeautifulSoup(r.text, "html.parser")
-        for link in soup.find_all("a", href=True)[:120]:
-            href = str(link.get("href", ""))
-            text = link.get_text(strip=True)
-            if "workatastartup.com/companies/" in href and text and 2 <= len(text) <= 60:
-                for slug in _ats_slugs_from_name(text)[:2]:
-                    if slug in seen_slugs:
-                        continue
-                    if _check_greenhouse(slug):
-                        seen_slugs.add(slug)
-                        verified.append({"name": text, "website": href, "ats_type": "greenhouse", "slug": slug})
-                        rt_count += 1
-                        break
-                    if _check_lever(slug):
-                        seen_slugs.add(slug)
-                        verified.append({"name": text, "website": href, "ats_type": "lever", "slug": slug})
-                        rt_count += 1
-                        break
+        if added:
+            print(f"Watchlist cache updated: {added} new verified company(ies) for next run")
     except Exception as e:
-        print(f"  [WARNING] YC Work at a Startup scrape failed: {e}")
-
-    # Wellfound
-    try:
-        r = requests.get(
-            "https://wellfound.com/jobs?role=software-engineer&remote=true",
-            headers=HEADERS, timeout=10,
-        )
-        soup = BeautifulSoup(r.text, "html.parser")
-        for tag in soup.find_all(class_=re.compile("company", re.I))[:60]:
-            text = tag.get_text(strip=True)
-            if not text or len(text) < 2 or len(text) > 60:
-                continue
-            for slug in _ats_slugs_from_name(text)[:1]:
-                if slug in seen_slugs:
-                    continue
-                if _check_greenhouse(slug):
-                    seen_slugs.add(slug)
-                    verified.append({"name": text, "website": "", "ats_type": "greenhouse", "slug": slug})
-                    rt_count += 1
-                    break
-    except Exception as e:
-        print(f"  [WARNING] Wellfound scrape failed: {e}")
-
-    # 5. Fall back to bootstrap list if discovery returned nothing
-    if not verified:
-        print(f"  [FALLBACK] Dynamic discovery found no companies — using fallback list")
-        return FALLBACK_COMPANIES
-
-    # 6. Cache and report
-    n_gh = sum(1 for c in verified if c.get("ats_type") == "greenhouse")
-    n_lv = sum(1 for c in verified if c.get("ats_type") == "lever")
-    try:
-        with open(WATCHLIST_CACHE_FILE, "w") as f:
-            json.dump({"companies": verified, "built_at": datetime.now().isoformat()}, f, indent=2)
-    except Exception as e:
-        print(f"  [WARNING] Could not save watchlist_cache.json: {e}")
-
-    print(f"Dynamic watchlist built: {n_gh} Greenhouse companies, {n_lv} Lever companies, {rt_count} from real-time sources")
-    return verified
+        print(f"WARNING: could not write watchlist cache: {e}")
 
 
-# Build dynamic watchlist on startup (uses cache when available — fast path)
-COMPANIES = build_dynamic_watchlist()
-
-# Extract ATS-specific lists for backward compatibility with scrape functions
-GREENHOUSE_SLUGS = [c["slug"] for c in COMPANIES if c.get("ats_type") == "greenhouse"]
-LEVER_SLUGS = [c["slug"] for c in COMPANIES if c.get("ats_type") == "lever"]
-ASHBY_SLUGS = []  # No Ashby companies in this setup yet
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-}
-
-def hours_ago(dt):
-    """Calculate hours elapsed since datetime dt. Returns 999 if dt is None."""
-    if dt is None:
-        return 999
-    now = datetime.now(timezone.utc)
-    if hasattr(dt, 'astimezone'):
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        return 999
-    delta = now - dt
-    return int(delta.total_seconds() / 3600)
-
-def is_intern(title):
-    """Check if job title is for an internship."""
-    if not title:
-        return False
-    t = title.lower()
-    return "intern" in t or "co-op" in t or "graduate" in t
+COMPANIES = build_watchlist()
+GREENHOUSE_SLUGS = [(c["slug"], c["name"]) for c in COMPANIES if c.get("ats_type") == "greenhouse"]
+LEVER_SLUGS = [(c["slug"], c["name"]) for c in COMPANIES if c.get("ats_type") == "lever"]
+ASHBY_SLUGS = list(config.ASHBY_COMPANIES)
 
 
-def resume_hint(title, desc=""):
-    t = (title + " " + desc).lower()
-    if any(k in t for k in ["rag", "llm", "ai ", "ml ", "machine learning", "genai"]):
-        return "AI/ML Resume"
-    if any(k in t for k in ["data pipeline", "analytics", "etl", "sql", "data engineer"]):
-        return "Data Resume"
-    if any(k in t for k in ["frontend", "front-end", "react", "css", "html"]):
-        return "Frontend Resume"
-    return "SWE Base Resume"
-
-def score(title, desc=""):
-    """Calculate match score (0-100) for a job based on title and description."""
-    if not title:
-        return 0
-    text = (title + " " + desc).lower()
-    score_val = 0
-    
-    # High-value keywords (25 points each)
-    high_value = ["rag", "llm", "ai ", "ml ", "machine learning", "genai", "data engineer", "analytics"]
-    score_val += sum(25 for keyword in high_value if keyword in text)
-    
-    # Medium-value keywords (15 points each)
-    medium_value = ["backend", "fullstack", "frontend", "react", "python", "java", "c++", "go"]
-    score_val += sum(15 for keyword in medium_value if keyword in text)
-    
-    # Low-value keywords (5 points each)
-    low_value = ["remote", "flexible", "hybrid", "relocation", "visa"]
-    score_val += sum(5 for keyword in low_value if keyword in text)
-    
-    return min(score_val, 100)  # Cap at 100
-
-def job(title,company,location,url,dt,source,desc=""):
-    ha = hours_ago(dt)
-    return {"title":title,"company":company,"location":location,"job_url":url,
-            "hours_ago":ha,"source":source,"description":desc[:400]}
+# ===========================================================================
+# Sources (stable ATS JSON APIs + RemoteOK; scrapers do not filter by role
+# type -- central processing handles relevance/paid/location/ranking)
+# ===========================================================================
 
 def scrape_greenhouse(max_h):
-    """Scrape Greenhouse ATS boards using public API."""
     out = []
-    for token in GREENHOUSE_SLUGS:
+    for slug, name in GREENHOUSE_SLUGS:
         try:
-            url = f"https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true"
-            r = requests.get(url, headers=HEADERS, timeout=8)
-            if r.status_code == 404:
-                # Token doesn't exist, skip silently
-                continue
+            r = requests.get(
+                f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true",
+                headers=HEADERS, timeout=8,
+            )
             if r.status_code != 200:
                 continue
-            
-            for j in r.json().get("jobs", []):
+            postings = r.json().get("jobs", [])
+            board_size = len(postings)
+            for j in postings:
                 title = j.get("title", "")
-                if not is_intern(title):
+                if not _title_maybe_relevant(title):
                     continue
-                
-                # Parse timestamp from updated_at or created_at
                 dt = None
-                for ts_field in ["updated_at", "created_at"]:
-                    ts_str = j.get(ts_field, "")
-                    if ts_str:
+                for field in ("updated_at", "created_at"):
+                    ts = j.get(field, "")
+                    if ts:
                         try:
-                            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                             break
-                        except Exception as e:
-                            print(f"WARNING: [Greenhouse:{token}] timestamp parse error: {e}")
+                        except ValueError:
                             continue
-                
-                # Default to 72h ago if no timestamp found
                 if dt is None:
                     dt = datetime.now(timezone.utc) - timedelta(hours=72)
-                
                 if hours_ago(dt) > max_h:
                     continue
-                
-                location = j.get("location", {})
-                if isinstance(location, dict):
-                    loc_name = location.get("name", "")
-                else:
-                    loc_name = str(location)
-                
-                out.append(job(
-                    title,
-                    token.replace("-", " ").title(),
-                    loc_name,
-                    j.get("absolute_url", ""),
-                    dt,
-                    "Greenhouse",
-                    BeautifulSoup(j.get("content", ""), "html.parser").get_text()[:400]
-                ))
+                loc = j.get("location", {})
+                loc_name = loc.get("name", "") if isinstance(loc, dict) else str(loc)
+                desc = BeautifulSoup(j.get("content", ""), "html.parser").get_text()
+                out.append(job(title, name, loc_name, j.get("absolute_url", ""), dt,
+                               "Greenhouse", desc, board_size=board_size))
         except Exception as e:
-            print(f"WARNING: [Greenhouse:{token}] {e}")
+            print(f"WARNING: [Greenhouse:{slug}] {e}")
     return out
 
+
 def scrape_lever(max_h):
-    """Scrape Lever ATS boards using public API."""
     out = []
-    for slug in LEVER_SLUGS:
+    for slug, name in LEVER_SLUGS:
         try:
-            url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
-            r = requests.get(url, headers=HEADERS, timeout=8)
-            if r.status_code == 404:
-                # Company doesn't have Lever board, skip silently
-                continue
+            r = requests.get(
+                f"https://api.lever.co/v0/postings/{slug}?mode=json",
+                headers=HEADERS, timeout=8,
+            )
             if r.status_code != 200:
                 continue
-            
-            for j in r.json():
+            postings = r.json()
+            board_size = len(postings) if isinstance(postings, list) else None
+            for j in postings:
                 title = j.get("text", "")
-                if not is_intern(title):
+                if not _title_maybe_relevant(title):
                     continue
-                
-                # Parse createdAt Unix timestamp (in milliseconds)
                 dt = None
                 created_ms = j.get("createdAt", 0)
                 if created_ms and created_ms > 0:
                     try:
                         dt = datetime.fromtimestamp(created_ms / 1000.0, tz=timezone.utc)
-                    except Exception as e:
-                        print(f"WARNING: [Lever:{slug}] timestamp parse error: {e}")
-                
-                # Default to 72h ago if no timestamp found
+                    except (ValueError, OSError):
+                        pass
                 if dt is None:
                     dt = datetime.now(timezone.utc) - timedelta(hours=72)
-                
                 if hours_ago(dt) > max_h:
                     continue
-                
-                location = j.get("categories", {}).get("location", "")
-                out.append(job(
-                    title,
-                    slug.replace("-", " ").title(),
-                    location,
-                    j.get("hostedUrl", ""),
-                    dt,
-                    "Lever",
-                    j.get("descriptionPlain", "")[:400]
-                ))
+                loc = j.get("categories", {}).get("location", "")
+                out.append(job(title, name, loc, j.get("hostedUrl", ""), dt, "Lever",
+                               j.get("descriptionPlain", ""), board_size=board_size))
         except Exception as e:
             print(f"WARNING: [Lever:{slug}] {e}")
     return out
 
+
 def scrape_ashby(max_h):
-    out=[]
+    """Ashby's public REST job-board API. Startup-heavy, with real timestamps."""
+    out = []
     for slug in ASHBY_SLUGS:
         try:
-            payload={"operationName":"ApiJobBoardWithTeams",
-                     "variables":{"organizationHostedJobsPageName":slug},
-                     "query":"query ApiJobBoardWithTeams($organizationHostedJobsPageName:String!){jobBoard:publishedJobBoard(organizationHostedJobsPageName:$organizationHostedJobsPageName){jobPostings{id title locationName publishedDate externalLink}}}"}
-            r=requests.post("https://jobs.ashbyhq.com/api/non-user-graphql?op=ApiJobBoardWithTeams",
-                            json=payload,headers=HEADERS,timeout=6)
+            r = requests.get(
+                f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
+                headers=HEADERS, timeout=8,
+            )
             if r.status_code != 200:
                 continue
-            job_postings = (r.json().get("data", {}).get("jobBoard", {}) or {}).get("jobPostings", []) or []
-            for j in job_postings:
-                t = j.get("title", "")
-                if not is_intern(t):
+            postings = r.json().get("jobs", []) or []
+            board_size = len(postings)
+            for j in postings:
+                if j.get("isListed") is False:
+                    continue
+                title = j.get("title", "")
+                if not _title_maybe_relevant(title):
                     continue
                 dt = None
-                try:
-                    dt = datetime.fromisoformat(str(j.get("publishedDate", "")).replace("Z", "+00:00"))
-                except Exception as e:
-                    print(f"WARNING: [Ashby:{slug}] timestamp parse error: {e}")
+                ts = j.get("publishedAt") or j.get("updatedAt") or ""
+                if ts:
+                    try:
+                        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                    except ValueError:
+                        pass
                 if hours_ago(dt) > max_h:
                     continue
-                url = j.get("externalLink") or f"https://jobs.ashbyhq.com/{slug}/{j.get('id','')}"
-                out.append(job(
-                    t,
-                    slug.replace("-", " ").title(),
-                    j.get("locationName", ""),
-                    url,
-                    dt,
-                    "Ashby/YC"
-                ))
+                loc = j.get("location") or ("Remote" if j.get("isRemote") else "")
+                url = j.get("jobUrl") or j.get("applyUrl") or ""
+                out.append(job(title, slug.replace("-", " ").title(), loc, url, dt,
+                               "Ashby", j.get("descriptionPlain", ""), board_size=board_size))
         except Exception as e:
             print(f"WARNING: [Ashby:{slug}] {e}")
     return out
 
-def scrape_wellfound():
-    out=[]
+
+def scrape_remoteok(max_h):
+    """RemoteOK exposes a documented JSON API at /api. Single polite request."""
+    out = []
     try:
-        r = requests.get("https://wellfound.com/jobs?role=engineer&job_type=internship",
-                        headers=HEADERS, timeout=10)
+        r = requests.get("https://remoteok.com/api", headers=HEADERS, timeout=12)
+        if r.status_code != 200:
+            return out
+        for j in r.json():
+            if not isinstance(j, dict) or not j.get("position") or not j.get("company"):
+                continue
+            title = j.get("position", "")
+            if not _title_maybe_relevant(title):
+                continue
+            dt = None
+            epoch = j.get("epoch")
+            if epoch:
+                try:
+                    dt = datetime.fromtimestamp(int(epoch), tz=timezone.utc)
+                except (ValueError, OSError):
+                    pass
+            if dt is None and j.get("date"):
+                try:
+                    dt = datetime.fromisoformat(str(j["date"]).replace("Z", "+00:00"))
+                except ValueError:
+                    pass
+            if hours_ago(dt) > max_h:
+                continue
+            tags = j.get("tags", []) or []
+            loc = j.get("location") or "Remote"
+            desc = BeautifulSoup(j.get("description", ""), "html.parser").get_text()
+            desc = (desc + " " + " ".join(tags)).strip()
+            url = j.get("url") or j.get("apply_url", "")
+            out.append(job(title, j.get("company", ""), loc, url, dt, "RemoteOK", desc))
+    except Exception as e:
+        print(f"WARNING: [RemoteOK] {e}")
+    return out
+
+
+def scrape_wellfound(max_h=None):
+    """Best-effort HTML scrape. Off by default; fragile and unstable markup."""
+    out = []
+    try:
+        r = requests.get("https://wellfound.com/jobs?role=software-engineer&remote=true",
+                         headers=HEADERS, timeout=10)
         soup = BeautifulSoup(r.text, "html.parser")
         for card in soup.select("div[class*='JobListing'], div[class*='job-listing']")[:30]:
             a = card.find("a", href=True)
             co = card.find(class_=re.compile("company", re.I))
-            if a and is_intern(a.text):
-                dt = datetime.now(timezone.utc) - timedelta(hours=72)
-                out.append(job(
-                    a.text.strip(),
-                    co.text.strip() if co else "",
-                    "Remote",
-                    "https://wellfound.com" + a["href"],
-                    dt,
-                    "Wellfound"
-                ))
+            if a and _title_maybe_relevant(a.text):
+                dt = datetime.now(timezone.utc) - timedelta(hours=48)
+                out.append(job(a.text.strip(), co.text.strip() if co else "",
+                               "Remote", "https://wellfound.com" + a["href"], dt, "Wellfound"))
     except Exception as e:
         print(f"WARNING: [Wellfound] {e}")
     return out
 
+
 def scrape_jobspy(max_h):
-    """Scrape LinkedIn and Indeed using JobSpy (ZipRecruiter removed)."""
+    """Disabled by default (config.SOURCES). LinkedIn/Indeed via JobSpy."""
     out = []
     try:
         from jobspy import scrape_jobs
-        for term in [
-            "software engineering intern 2026",
-            "AI engineering intern remote",
-            "backend engineer intern",
-            "fullstack intern"
-        ]:
-            try:
-                df = scrape_jobs(
-                    site_name=["linkedin", "indeed"],
-                    search_term=term,
-                    location="United States",
-                    results_wanted=15,
-                    hours_old=max_h,
-                    country_indeed="USA",
-                    is_remote=True
-                )
-                if df is not None and not df.empty:
-                    for _, row in df.iterrows():
-                        t = str(row.get("title", ""))
-                        if not is_intern(t):
-                            continue
-                        
-                        # Convert date_posted to UTC datetime
-                        dt = row.get("date_posted")
-                        if hasattr(dt, "to_pydatetime"):
-                            dt = dt.to_pydatetime()
-                        
-                        # Ensure UTC timezone
-                        if dt and isinstance(dt, datetime):
-                            if dt.tzinfo is None:
-                                # Assume UTC if no timezone info
-                                dt = dt.replace(tzinfo=timezone.utc)
-                        
-                        # Default to 72h ago if no timestamp
-                        if dt is None:
-                            dt = datetime.now(timezone.utc) - timedelta(hours=72)
-                        
-                        if hours_ago(dt) > max_h:
-                            continue
-                        
-                        out.append(job(
-                            t,
-                            str(row.get("company", "")),
-                            str(row.get("location", "")),
-                            str(row.get("job_url", "")),
-                            dt,
-                            str(row.get("site", "")).title(),
-                            str(row.get("description", ""))[:400]
-                        ))
-            except Exception as e:
-                print(f"WARNING: [JobSpy:{term!r}] {e}")
     except ImportError:
-        print("  [jobspy] skipped — run: pip install python-jobspy")
+        print("  [jobspy] not installed; skipping")
+        return out
+    for term in ["AI engineer remote", "machine learning engineer", "full stack engineer python"]:
+        try:
+            df = scrape_jobs(site_name=["linkedin", "indeed"], search_term=term,
+                             location="United States", results_wanted=15,
+                             hours_old=max_h, country_indeed="USA", is_remote=True)
+            if df is None or df.empty:
+                continue
+            for _, row in df.iterrows():
+                title = str(row.get("title", ""))
+                if not _title_maybe_relevant(title):
+                    continue
+                dt = row.get("date_posted")
+                if hasattr(dt, "to_pydatetime"):
+                    dt = dt.to_pydatetime()
+                if isinstance(dt, datetime) and dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if not isinstance(dt, datetime):
+                    dt = datetime.now(timezone.utc) - timedelta(hours=72)
+                if hours_ago(dt) > max_h:
+                    continue
+                out.append(job(title, str(row.get("company", "")), str(row.get("location", "")),
+                               str(row.get("job_url", "")), dt, str(row.get("site", "")).title(),
+                               str(row.get("description", ""))))
+        except Exception as e:
+            print(f"WARNING: [JobSpy:{term!r}] {e}")
     return out
 
-def find_contacts(company,role,client):
+
+# ===========================================================================
+# Core pipeline: collect -> process (filter/rank/dedup)
+# ===========================================================================
+
+def collect_jobs(hours):
+    """Scrape every enabled source. Returns (jobs, per-source counts)."""
+    registry = [
+        ("Greenhouse ATS",  "greenhouse", scrape_greenhouse, {"max_h": hours}),
+        ("Lever ATS",       "lever",      scrape_lever,      {"max_h": hours}),
+        ("Ashby ATS",       "ashby",      scrape_ashby,      {"max_h": hours}),
+        ("RemoteOK",        "remoteok",   scrape_remoteok,   {"max_h": hours}),
+        ("Wellfound",       "wellfound",  scrape_wellfound,  {"max_h": hours}),
+        ("LinkedIn/Indeed", "jobspy",     scrape_jobspy,     {"max_h": hours}),
+    ]
+    jobs, stats = [], {}
+    for label, key, fn, kw in registry:
+        if not config.SOURCES.get(key, False):
+            continue
+        print(f"Scraping {label}...")
+        found = fn(**kw)
+        print(f"  {len(found)} candidate roles")
+        jobs.extend(found)
+        stats[label] = len(found)
+    return jobs, stats
+
+
+def process_jobs(raw):
+    """Filter to relevant paid US/remote roles, rank, and dedupe across sources."""
+    processed = []
+    for j in raw:
+        title, desc = j.get("title", ""), j.get("description", "")
+        if not is_relevant(title, desc):
+            continue
+        if is_excluded_company(j.get("company", "")):
+            continue
+        if is_excluded_function(title):
+            continue
+        if is_excluded_seniority(title):
+            continue
+        if years_required(desc) >= config.MAX_YEARS:
+            continue
+        if not is_usa_location(j.get("location", "")):
+            continue
+        rt = role_type(title, desc)
+        if rt == "intern" and not config.INCLUDE_INTERNSHIPS:
+            continue
+        j["role_type"] = rt
+        j["requires_degree"] = requires_degree(title, desc)
+        if j["requires_degree"] and config.DEGREE_REQUIREMENT_MODE == "filter":
+            continue
+        j["rank_score"] = rank_score(j)
+        j["score"] = int(j["rank_score"])  # kept for the web frontend
+        j["fresh"] = fresh_flag(j.get("hours_ago", 999))
+        processed.append(j)
+
+    processed.sort(key=lambda x: (-x["rank_score"], x.get("hours_ago", 999)))
+    seen, deduped = set(), []
+    for j in processed:
+        key = (j["company"].lower().strip(), j["title"].lower().strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(j)
+    return deduped
+
+
+# ===========================================================================
+# Outreach (contact research uses web search per policy)
+# ===========================================================================
+
+def _extract_text(resp):
+    """Join all text blocks from an Anthropic response (tool use returns many)."""
+    parts = []
+    for block in getattr(resp, "content", []) or []:
+        if getattr(block, "type", None) == "text":
+            parts.append(block.text)
+    return "\n".join(parts).strip()
+
+
+def find_contacts(company, role, client):
+    """Research up to 3 real outreach targets. Always uses web search."""
+    prompt = (
+        f'Research and return up to 3 real people at "{company}" who are the best '
+        f'outreach targets for a "{role}" role. Prioritize engineering hiring '
+        f'managers and technical recruiters, then engineers on the relevant team. '
+        f'Use web search to find current, real people and their public LinkedIn profiles. '
+        f'Return ONLY a JSON array, no prose:\n'
+        f'[{{"name": "", "title": "", "reason": "", '
+        f'"linkedin_search_url": "https://www.linkedin.com/search/results/people/?keywords=...", '
+        f'"guessed_email": null}}]'
+    )
     try:
-        r=client.messages.create(model="claude-sonnet-4-20250514",max_tokens=700,
-            messages=[{"role":"user","content":f"""Find 3 best LinkedIn contacts at "{company}" for "{role}" internship.
-Priority: {os.getenv("YOUR_SCHOOL", "my university")} alumni > recruiters/TA > junior/mid engineers.
-Return JSON array only:
-[{{"name":null,"title":"","reason":"","linkedin_search_url":"https://linkedin.com/search/results/people/?keywords=...","guessed_email":null}}]"""}])
-        return json.loads(re.sub(r'```json|```','',r.content[0].text).strip())
+        r = client.messages.create(
+            model=OUTREACH_MODEL, max_tokens=1200,
+            tools=[WEB_SEARCH_TOOL],
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = re.sub(r"```json|```", "", _extract_text(r)).strip()
+        m = re.search(r"\[.*\]", text, re.S)
+        return json.loads(m.group(0)) if m else []
     except Exception as e:
         print(f"WARNING: [find_contacts:{company}] {e}")
         return []
 
-def draft_messages(company,role,url,contact,client):
-    name=contact.get("name") or ""
-    reason=contact.get("reason","")
-    school = os.getenv("YOUR_SCHOOL", "my university")
-    angle=(f"I noticed we both went to {school}!" if "alumni" in reason.lower() or school.lower().split()[0] in reason.lower()
-           else f"I came across your profile while researching {company}.")
-    try:
-        r=client.messages.create(model="claude-sonnet-4-20250514",max_tokens=700,
-            messages=[{"role":"user","content":f"""Draft outreach from {YOUR_NAME} to {name or 'this person'} at {company} re: {role}.
-Connection: {angle}
-Background: {MY_BACKGROUND}
-Job: {url}
-No em-dashes. Warm, specific, professional.
-Return JSON only: {{"email_subject":"","email_body":"","linkedin_message":"(under 280 chars)"}}"""}])
-        return json.loads(re.sub(r'```json|```','',r.content[0].text).strip())
-    except Exception as e:
-        print(f"WARNING: [draft_messages:{company}] {e}")
-        return {"email_subject":"","email_body":"","linkedin_message":""}
 
-def get_gmail():
+def draft_message(company, role, url, contact, client):
+    """Draft a short, tailored outreach note from the profile in .env."""
+    name = contact.get("name") or "there"
     try:
-        from google.oauth2.credentials import Credentials
-        from google_auth_oauthlib.flow import InstalledAppFlow
-        from google.auth.transport.requests import Request
-        from googleapiclient.discovery import build
-        # gmail.compose covers both send and draft creation (superset of gmail.send).
-        # If your existing token.json only has gmail.send, delete it and re-run once
-        # to re-authorize with the broader scope.
-        SCOPES=["https://www.googleapis.com/auth/gmail.compose"]
-        creds=None
-        if Path("token.json").exists():
-            creds=Credentials.from_authorized_user_file("token.json",SCOPES)
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                if not Path("credentials.json").exists():
-                    return None
-                creds=InstalledAppFlow.from_client_secrets_file("credentials.json",SCOPES).run_local_server(port=0)
-            Path("token.json").write_text(creds.to_json())
-        return build("gmail","v1",credentials=creds)
+        r = client.messages.create(
+            model=OUTREACH_MODEL, max_tokens=600,
+            messages=[{"role": "user", "content": (
+                f"Draft a short outreach note from {YOUR_NAME or 'the candidate'} to {name}, "
+                f"{contact.get('title', '')} at {company}, about the {role} role ({url}).\n"
+                f"Background: {MY_BACKGROUND}\n"
+                f"Keep it under 90 words, specific, warm, professional. No em-dashes, no emojis.\n"
+                f'Return JSON only: {{"linkedin_message": "(under 280 chars)", "email_subject": "", "email_body": ""}}'
+            )}],
+        )
+        text = re.sub(r"```json|```", "", _extract_text(r)).strip()
+        m = re.search(r"\{.*\}", text, re.S)
+        return json.loads(m.group(0)) if m else {}
     except Exception as e:
-        print(f"WARNING: [Gmail setup] {e}")
-        return None
+        print(f"WARNING: [draft_message:{company}] {e}")
+        return {}
 
-def send_email(gmail,to,subject,body,dry_run=False):
-    import base64
-    from email.mime.text import MIMEText
-    if dry_run or not gmail:
-        print(f"    [draft] {to} | {subject[:45]}")
-        return False
-    try:
-        msg = MIMEText(body)
-        msg["to"] = to
-        msg["from"] = YOUR_EMAIL
-        msg["subject"] = subject
-        gmail.users().messages().send(userId="me",
-            body={"raw":base64.urlsafe_b64encode(msg.as_bytes()).decode()}).execute()
-        return True
-    except Exception as e:
-        print(f"    Email failed: {e}")
-        return False
 
-def write_excel(jobs,outreach):
+def _fallback_contact(company, role):
+    """A usable contact when live research is unavailable (no name, but a real
+    target profile and a LinkedIn search that lands on the right people)."""
+    return {
+        "name": "",
+        "title": "Engineering Recruiter or Hiring Manager",
+        "reason": f"Owns or influences hiring for {role} at {company}. Search, then connect.",
+        "linkedin_search_url": "https://www.linkedin.com/search/results/people/?keywords="
+                               + quote_plus(f"{company} recruiter engineering"),
+        "guessed_email": None,
+    }
+
+
+def _template_draft(company, role):
+    """A profile-based draft used when the Claude draft is unavailable."""
+    name = YOUR_NAME or "the candidate"
+    bg = MY_BACKGROUND or ("I build full-stack and applied-AI features end to end "
+                           "(Python, FastAPI, React, TypeScript).")
+    li = (f"Hi, I'm {name}. I saw the {role} opening at {company} and it lines up well with my "
+          f"background in Python, FastAPI, React and applied AI. Open to a quick chat about it?")
+    body = (f"Hi,\n\nI came across the {role} role at {company} and wanted to reach out directly. "
+            f"{bg} I would love to learn more about the team and where I could contribute.\n\n"
+            f"Best,\n{name}")
+    return {"linkedin_message": li[:280], "email_subject": f"{role} at {company}", "email_body": body}
+
+
+def build_outreach(jobs, client, top_n):
+    """
+    For the top-ranked roles, populate a contact and a tailored draft. Always
+    produces a row: if live research or drafting is unavailable (no funded key),
+    it falls back to a target-profile contact and a profile-based template.
+    """
+    outreach = []
+    targets = jobs[:top_n]
+    print(f"Preparing outreach for top {len(targets)} roles...")
+    for j in targets:
+        co, role, url = j.get("company", ""), j.get("title", ""), j.get("job_url", "")
+        if not co or not role:
+            continue
+        print(f"  {co} - {role}")
+        contacts = find_contacts(co, role, client) if client is not None else []
+        contact = contacts[0] if contacts else _fallback_contact(co, role)
+        msgs = draft_message(co, role, url, contact, client) if (client is not None and contacts) else {}
+        if not msgs:
+            msgs = _template_draft(co, role)
+        outreach.append({
+            "company": co, "role": role, "rank_score": j.get("rank_score", 0),
+            "name": contact.get("name", ""), "title": contact.get("title", ""),
+            "reason": contact.get("reason", ""),
+            "linkedin_url": contact.get("linkedin_search_url", ""),
+            "linkedin_msg": msgs.get("linkedin_message", ""),
+            "email": contact.get("guessed_email", "") or "",
+            "email_subj": msgs.get("email_subject", ""),
+            "email_body": msgs.get("email_body", ""),
+        })
+    return outreach
+
+
+# ===========================================================================
+# Excel output
+# ===========================================================================
+
+def write_excel(jobs, outreach):
     from openpyxl import Workbook
-    from openpyxl.styles import Font,PatternFill,Alignment
+    from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
 
-    ts=datetime.now().strftime("%Y-%m-%d_%H-%M")
-    fname=f"job_leads_{ts}.xlsx"
-    wb=Workbook()
-    hfill=PatternFill("solid",fgColor="0F2940")
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    fname = f"job_leads_{ts}.xlsx"
+    wb = Workbook()
+    header_fill = PatternFill("solid", fgColor="0F2940")
 
-    # Jobs sheet
+    # --- Jobs sheet ---
     ws = wb.active
-    ws.title = "Jobs — Apply Here"
-    hdrs = [
-        "#", "Role", "Company", "Location", "Source", "Posted", "Apply Link",
-        "Match Score", "Applied?", "Date Applied", "Status", "Notes"
-    ]
-    ws.append(hdrs)
+    ws.title = "Jobs"
+    headers = ["#", "Role", "Company", "Type", "Location", "Source", "Posted",
+               "Fresh", "Rank", "Apply Link", "Applied?", "Status", "Notes"]
+    ws.append(headers)
     for c in ws[1]:
-        c.font=Font(name="Arial",bold=True,color="FFFFFF",size=9)
-        c.fill = hfill
+        c.font = Font(name="Arial", bold=True, color="FFFFFF", size=9)
+        c.fill = header_fill
         c.alignment = Alignment(horizontal="center")
 
     for i, j in enumerate(jobs, 1):
         ha = j.get("hours_ago", 999)
-        posted = f"{ha:.0f}h ago" if ha < 999 else "Unknown"
+        posted = f"{ha}h ago" if ha < 999 else "Unknown"
         ws.append([
-            i,
-            j["title"],  # Role column
-            j["company"],
-            j["location"],
-            j["source"],
-            posted,
-            j["job_url"],
-            score(j["title"], j.get("description", "")),
-            "",  # Applied?
-            "",  # Date Applied
-            "Not Applied",  # Status
-            ""   # Notes
+            i, j["title"], j["company"], j.get("role_type", ""), j["location"],
+            j["source"], posted, j.get("fresh", ""), j.get("rank_score", 0),
+            j["job_url"], "", "Not Applied", "",
         ])
         color = (
-            "D5F5E3" if ha <= 6 else
-            "D6EAF8" if ha <= 24 else
-            "FEF9E7" if ha <= 48 else "FDFEFE"
+            "F1948A" if ha < 1 else      # red: under 1 hour, act now
+            "D5F5E3" if ha < 6 else      # green: under 6 hours
+            "D6EAF8" if ha < 24 else     # blue: under 24 hours
+            "FEF9E7" if ha < 48 else     # yellow: under 48 hours
+            "FDFEFE"                      # white: older
         )
         for c in ws[i + 1]:
             c.fill = PatternFill("solid", fgColor=color)
 
-    for i, w in enumerate([4, 35, 22, 18, 12, 14, 50, 12, 18, 14, 14, 20], 1):
+    for i, w in enumerate([4, 40, 20, 15, 20, 12, 11, 7, 7, 50, 10, 14, 24], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
-    ws.freeze_panes="A2"
+    ws.freeze_panes = "A2"
 
-    # Outreach sheet
-    ws2=wb.create_sheet("Outreach — Do This")
-    hdrs2=["Company","Role","Contact Name","Contact Title","Why Reach Out",
-           "LinkedIn Search URL","LinkedIn Message (copy+send manually)",
-           "Email Address","Email Subject","Email Body Preview","Email Sent?","LinkedIn Sent?"]
-    ws2.append(hdrs2)
-    for c in ws[1]:
+    # --- Outreach sheet (ranked by leverage) ---
+    ws2 = wb.create_sheet("Outreach")
+    headers2 = ["Company", "Role", "Rank", "Contact Name", "Contact Title",
+                "Why Reach Out", "LinkedIn Search", "Draft Message", "Guessed Email"]
+    ws2.append(headers2)
+    for c in ws2[1]:
         c.font = Font(name="Arial", bold=True, color="FFFFFF", size=9)
-        c.fill = hfill
+        c.fill = header_fill
         c.alignment = Alignment(horizontal="center")
     for row in outreach:
-        ws2.append([row.get("company",""),row.get("role",""),
-                    row.get("name",""),row.get("title",""),row.get("reason",""),
-                    row.get("linkedin_url",""),row.get("linkedin_msg",""),
-                    row.get("email",""),row.get("email_subj",""),
-                    row.get("email_body","")[:250]+"...",
-                    row.get("email_sent",""),
-                    "SEND MANUALLY via LinkedIn"])
-    for i,w in enumerate([22,30,20,22,28,50,55,28,35,45,14,25],1):
-        ws2.column_dimensions[get_column_letter(i)].width=w
-    ws2.freeze_panes="A2"
+        draft = row.get("linkedin_msg", "") or row.get("email_body", "")
+        ws2.append([
+            row.get("company", ""), row.get("role", ""), row.get("rank_score", 0),
+            row.get("name", ""), row.get("title", ""), row.get("reason", ""),
+            row.get("linkedin_url", ""), draft, row.get("email", ""),
+        ])
+    for i, w in enumerate([20, 34, 7, 20, 24, 34, 45, 55, 28], 1):
+        ws2.column_dimensions[get_column_letter(i)].width = w
+    ws2.freeze_panes = "A2"
 
-    # Legend
-    ws3=wb.create_sheet("Legend & Setup")
+    # --- Legend ---
+    ws3 = wb.create_sheet("Legend")
     for row in [
-        ["COLOR KEY",""],
-        ["Green","Posted < 6 hours — apply IMMEDIATELY, you may be in first 10"],
-        ["Blue","Posted < 24 hours — apply today"],
-        ["Yellow","Posted < 48 hours — apply this week"],
-        ["White","Posted > 48 hours — still worth applying"],
-        [""],
-        ["OUTREACH INSTRUCTIONS",""],
-        ["LinkedIn messages","Copy from Outreach tab → open LinkedIn search URL → send. Takes 30 sec each."],
-        ["Emails","Sent automatically to guessed addresses. Check your Sent folder."],
-        [""],
-        ["SETUP",""],
-        ["1. Install","pip install python-jobspy pandas openpyxl anthropic requests beautifulsoup4"],
-        ["   Gmail","pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client"],
-        ["2. API key","export ANTHROPIC_API_KEY='sk-...'"],
-        ["3. Gmail","Get credentials.json from Google Cloud Console (enable Gmail API, OAuth Desktop)"],
-        ["4. Run","python job_pipeline_full.py"],
-        ["   Dry run","python job_pipeline_full.py --no-email"],
-        ["   Fresh only","python job_pipeline_full.py --hours 12"],
+        ["COLOR KEY", ""],
+        ["Red", "Posted under 1 hour. Apply now, you may be first."],
+        ["Green", "Posted under 6 hours. Apply today."],
+        ["Blue", "Posted under 24 hours."],
+        ["Yellow", "Posted under 48 hours."],
+        ["White", "Older than 48 hours."],
+        ["", ""],
+        ["RANK", "Higher is a better match: profile keywords + freshness + paid role type."],
+        ["TYPE", "full-time, contract-to-hire, or contract. Internships filtered out by default."],
+        ["", ""],
+        ["RUN MODES", ""],
+        ["Standard", "python job_pipeline_full.py"],
+        ["Fresh poll", "python job_pipeline_full.py --fresh"],
+        ["Custom window", "python job_pipeline_full.py --hours 24"],
+        ["Scrape only", "python job_pipeline_full.py --scrape-only"],
     ]:
         ws3.append(row)
-    ws3.column_dimensions["A"].width=20
-    ws3.column_dimensions["B"].width=80
+    ws3.column_dimensions["A"].width = 16
+    ws3.column_dimensions["B"].width = 80
 
-    # NOTE: caller is responsible for wb.save(fname) so that the Cold Outreach
-    # module can append its sheet before the file is written to disk.
+    # Caller saves the workbook so the cold-outreach module can append first.
     return fname, wb
 
-def run_pipeline_api(
-    api_key: str,
-    hours: int = 72,
-    cold_outreach_enabled: bool = True,
-    cold_outreach_limit: int = 10,
-) -> dict:
-    """
-    Run the full pipeline and return structured JSON results.
-    Called by api.py for each user-initiated run.
-    The API key is used only for the duration of this call and never written to disk.
-    """
+
+# ===========================================================================
+# API entry point (used by api.py)
+# ===========================================================================
+
+def run_pipeline_api(api_key, hours=None, cold_outreach_enabled=True, cold_outreach_limit=10):
+    """Run the pipeline and return structured JSON. Key used only for this call."""
     import anthropic
     client = anthropic.Anthropic(api_key=api_key)
+    hours = hours or config.DEFAULT_HOURS
 
     print(f"\n{'='*60}")
-    print(f"  Pipeline run — {datetime.now().strftime('%Y-%m-%d %H:%M')} ({hours}h window)")
+    print(f"  Pipeline run - {datetime.now().strftime('%Y-%m-%d %H:%M')} ({hours}h window)")
     print(f"{'='*60}\n")
 
-    # --- Scraping ---
-    all_jobs: list = []
-    for label, fn, kw in [
-        ("Greenhouse ATS",    scrape_greenhouse, {"max_h": hours}),
-        ("Lever ATS",         scrape_lever,      {"max_h": hours}),
-        ("Ashby/YC startups", scrape_ashby,      {"max_h": hours}),
-        ("Wellfound",         scrape_wellfound,  {}),
-        ("LinkedIn/Indeed",   scrape_jobspy,     {"max_h": hours}),
-    ]:
-        print(f"Scraping {label}...")
-        found = fn(**kw)
-        print(f"  {len(found)} internships found")
-        all_jobs.extend(found)
+    raw, _ = collect_jobs(hours)
+    jobs = process_jobs(raw)
+    fresh = sum(1 for j in jobs if j.get("hours_ago", 999) <= 24)
+    print(f"\nTotal: {len(jobs)} ranked roles | {fresh} posted in last 24h\n")
 
-    # --- Filtering ---
-    PA_CITIES = ["philadelphia", "exton", "hatfield", "king of prussia", "malvern", "wayne", "conshohocken"]
+    outreach = build_outreach(jobs, client, config.OUTREACH_TOP_N) if jobs else []
 
-    def _is_usa(loc):
-        if not loc or not isinstance(loc, str):
-            return False
-        s = loc.lower()
-        non_us = ["dublin", "luxembourg", "bengaluru", "toronto", "canada", "india", "brazil",
-                  "ireland", "germany", "uk", "united kingdom", "france", "europe", "singapore",
-                  "australia", "china", "japan", "hong kong", "mexico"]
-        if any(x in s for x in non_us):
-            return False
-        if any(c in s for c in PA_CITIES) or re.search(r",?\s*pa(\s|$|,)", s):
-            return True
-        if re.fullmatch(r"\s*remote\s*", s) or re.fullmatch(r"\s*united states\s*", s):
-            return True
-        if "remote" in s and not any(x in s for x in non_us):
-            return True
-        if re.search(r"\busa\b|\bunited states\b|\bus\b", s) and not any(x in s for x in non_us):
-            return True
-        return False
-
-    all_jobs = [j for j in all_jobs if is_intern(j["title"]) and _is_usa(j.get("location", ""))]
-
-    seen: set = set()
-    deduped: list = []
-    for j in all_jobs:
-        key = (j["company"].lower().strip(), j["title"].lower().strip())
-        if key not in seen:
-            seen.add(key)
-            deduped.append(j)
-
-    all_jobs = sorted(deduped, key=lambda x: x.get("hours_ago", 999))
-    fresh = sum(1 for j in all_jobs if j.get("hours_ago", 999) <= 24)
-    print(f"\nTotal: {len(all_jobs)} unique internships | {fresh} posted in last 24h\n")
-
-    # --- Add score to each job ---
-    for j in all_jobs:
-        j["score"] = score(j["title"], j.get("description", ""))
-
-    # --- Outreach (contact research + message drafting) ---
-    outreach: list = []
-    fresh_jobs = [j for j in all_jobs if j.get("hours_ago", 999) <= 96]
-    print(f"Researching contacts for {min(len(fresh_jobs), 35)} jobs...\n")
-    for j in fresh_jobs[:35]:
-        co   = j.get("company", "")
-        role = j.get("title", "")
-        url  = j.get("job_url", "")
-        if not co or not role:
-            continue
-        print(f"  {co} — {role}")
-        contacts = find_contacts(co, role, client)
-        for c in contacts[:2]:
-            msgs = draft_messages(co, role, url, c, client)
-            outreach.append({
-                "company":     co,
-                "role":        role,
-                "name":        c.get("name", ""),
-                "title":       c.get("title", ""),
-                "reason":      c.get("reason", ""),
-                "linkedin_url": c.get("linkedin_search_url", ""),
-                "linkedin_msg": msgs.get("linkedin_message", ""),
-                "email":       c.get("guessed_email", ""),
-                "email_subj":  msgs.get("email_subject", ""),
-                "email_body":  msgs.get("email_body", ""),
-                "email_sent":  "",
-            })
-
-    # --- Cold Outreach ---
-    cold_contacts: list = []
+    cold_contacts = []
     if cold_outreach_enabled:
         try:
             from openpyxl import Workbook as _WB
@@ -810,255 +894,149 @@ def run_pipeline_api(
             co_config = _co_cfg()
             co_config["cold_outreach_max_per_day"] = cold_outreach_limit
             co_config["anthropic_api_key"] = api_key
-            dummy_wb = _WB()
-            cold_contacts = run_cold_outreach(dummy_wb, co_config, gmail_service=None)
+            cold_contacts = run_cold_outreach(_WB(), co_config, gmail_service=None)
         except Exception as e:
             print(f"WARNING: [Cold Outreach] {e}")
 
-    timestamp = datetime.utcnow().isoformat() + "Z"
     return {
-        "jobs":          all_jobs,
-        "outreach":      outreach,
+        "jobs": jobs,
+        "outreach": outreach,
         "cold_outreach": cold_contacts,
         "summary": {
-            "total_jobs":          len(all_jobs),
-            "fresh_jobs":          fresh,
-            "outreach_count":      len(outreach),
+            "total_jobs": len(jobs),
+            "fresh_jobs": fresh,
+            "outreach_count": len(outreach),
             "cold_outreach_count": len(cold_contacts),
         },
-        "timestamp": timestamp,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
-def main():
-    p=argparse.ArgumentParser()
-    p.add_argument("--no-email",action="store_true")
-    p.add_argument("--hours",type=int,default=72)
-    p.add_argument("--limit",type=int,default=None)
-    p.add_argument("--scrape-only",action="store_true",
-                   help="Run scrapers and write Excel only — skip all Claude API and Gmail calls")
-    p.add_argument("--test-cold-outreach",action="store_true",
-                   help="Dry-run the Cold Outreach module: scrapes Robin Hood only, "
-                        "processes 2 companies, writes to 'Cold Outreach TEST' sheet, "
-                        "does NOT update seen_companies.json")
-    args=p.parse_args()
+# ===========================================================================
+# Gmail (used only to create cold-outreach drafts; never sends mail)
+# ===========================================================================
 
-    # ----------------------------------------------------------------
-    # --test-cold-outreach: standalone dry-run, exits after completion
-    # ----------------------------------------------------------------
+def get_gmail():
+    try:
+        from google.oauth2.credentials import Credentials
+        from google_auth_oauthlib.flow import InstalledAppFlow
+        from google.auth.transport.requests import Request
+        from googleapiclient.discovery import build
+        SCOPES = ["https://www.googleapis.com/auth/gmail.compose"]
+        creds = None
+        if Path("token.json").exists():
+            creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                if not Path("credentials.json").exists():
+                    return None
+                creds = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES).run_local_server(port=0)
+            Path("token.json").write_text(creds.to_json())
+        return build("gmail", "v1", credentials=creds)
+    except Exception as e:
+        print(f"WARNING: [Gmail setup] {e}")
+        return None
+
+
+# ===========================================================================
+# CLI
+# ===========================================================================
+
+def main():
+    p = argparse.ArgumentParser(description="EarlyBird job search pipeline")
+    p.add_argument("--hours", type=int, default=config.DEFAULT_HOURS,
+                   help="Lookback window in hours")
+    p.add_argument("--fresh", action="store_true",
+                   help="Fast poll: short window (config.FRESH_HOURS), scrape + Excel only")
+    p.add_argument("--scrape-only", action="store_true",
+                   help="Scrape and write Excel; skip all Claude API calls")
+    p.add_argument("--limit", type=int, default=None, help="Cap number of jobs")
+    p.add_argument("--no-email", action="store_true",
+                   help="Deprecated no-op; outreach is draft-only and never sends mail")
+    p.add_argument("--test-cold-outreach", action="store_true",
+                   help="Dry-run the cold-outreach module against one source, two companies")
+    args = p.parse_args()
+
     if args.test_cold_outreach:
         from openpyxl import Workbook as _WB
         from cold_outreach import run_cold_outreach, build_config as _co_cfg
-        print("\n" + "="*60)
-        print("  Cold Outreach — TEST RUN")
-        print("="*60)
+        print("\n" + "=" * 60 + "\n  Cold Outreach - TEST RUN\n" + "=" * 60)
         test_wb = _WB()
-        co_config = _co_cfg()
-        contacts = run_cold_outreach(
-            test_wb, co_config,
-            gmail_service=None,
-            test_mode=True,
-            test_source_limit=1,
-            test_company_limit=2,
-        )
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        test_fname = f"test_cold_outreach_{ts}.xlsx"
-        test_wb.save(test_fname)
-        print("\n" + "="*60)
-        print(f"  TEST COMPLETE — {len(contacts)} contact(s) found")
-        for c in contacts:
-            print(f"  • {c.get('company_name','')} | {c.get('first_name','')} {c.get('last_name','')} "
-                  f"| {c.get('email','(no email)')} | {c.get('email_status','')}")
-        print(f"  Output: {test_fname}")
-        print("  seen_companies.json was NOT modified (dry run)")
-        print("="*60 + "\n")
+        contacts = run_cold_outreach(test_wb, _co_cfg(), gmail_service=None,
+                                     test_mode=True, test_source_limit=1, test_company_limit=2)
+        fname = f"test_cold_outreach_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.xlsx"
+        test_wb.save(fname)
+        print(f"\n  TEST COMPLETE - {len(contacts)} contact(s) | Output: {fname}\n")
         sys.exit(0)
 
-    if not args.scrape_only:
-        api_key=os.getenv("ANTHROPIC_API_KEY")
+    fresh_mode = args.fresh
+    hours = config.FRESH_HOURS if fresh_mode else args.hours
+    do_claude = not args.scrape_only and not fresh_mode
+
+    client = None
+    if do_claude:
+        api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
-            print("Set ANTHROPIC_API_KEY in .env file or:\n  export ANTHROPIC_API_KEY='sk-...'")
+            print("Set ANTHROPIC_API_KEY in .env (or run with --scrape-only / --fresh)")
             sys.exit(1)
-
-        for var in ["YOUR_NAME", "YOUR_EMAIL", "YOUR_LINKEDIN", "YOUR_SCHOOL", "MY_BACKGROUND"]:
+        for var in ["YOUR_NAME", "MY_BACKGROUND"]:
             if not os.getenv(var):
-                print(f"WARNING: {var} is not set in .env — outreach messages may be incomplete")
-
+                print(f"WARNING: {var} not set in .env; outreach drafts may be generic")
         import anthropic
-        client=anthropic.Anthropic(api_key=api_key)
-    else:
-        client=None
-        api_key=None
+        client = anthropic.Anthropic(api_key=api_key)
 
-    gmail=get_gmail() if (not args.no_email and not args.scrape_only) else None
-
+    mode = "FRESH poll" if fresh_mode else ("scrape-only" if args.scrape_only else "standard")
     print(f"\n{'='*60}")
-    print(f"  Job Pipeline — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f"  Finding jobs posted within {args.hours} hours")
+    print(f"  EarlyBird - {datetime.now().strftime('%Y-%m-%d %H:%M')} ({mode})")
+    print(f"  Companies: {len(COMPANIES)} | Window: {hours}h")
     print(f"{'='*60}\n")
 
-    all_jobs = []
-    source_stats = {}  # Track raw vs filtered for each source
-    
-    for label, fn, kw in [
-        ("Greenhouse ATS (startups/tech)", scrape_greenhouse, {"max_h": args.hours}),
-        ("Lever ATS", scrape_lever, {"max_h": args.hours}),
-        ("Ashby/YC startups", scrape_ashby, {"max_h": args.hours}),
-        ("Wellfound/AngelList", scrape_wellfound, {}),
-        ("LinkedIn/Indeed", scrape_jobspy, {"max_h": args.hours}),
-    ]:
-        print(f"Scraping {label}...")
-        found = fn(**kw)
-        raw_count = len(found)
-        print(f"  {raw_count} internships found (raw)")
-        all_jobs.extend(found)
-        source_stats[label] = {"raw": raw_count, "filtered": 0}
-
-    # Geographic filtering: Only keep jobs in PA, Remote, or US (no non-US cities/countries)
-    PA_CITIES = [
-        "philadelphia", "exton", "hatfield", "king of prussia", "malvern", "wayne", "conshohocken"
-    ]
-    def is_usa_location(loc):
-        if not loc or not isinstance(loc, str):
-            return False
-        location_str = loc.lower()
-        # Remove jobs with obvious non-US cities/countries
-        non_us_keywords = [
-            "dublin", "luxembourg", "bengaluru", "são paulo", "warsaw", "toronto", "canada", "india", "brazil", "ireland", "germany", "uk", "united kingdom", "france", "europe", "singapore", "australia", "china", "japan", "hong kong", "mexico", "spain", "netherlands", "sweden", "switzerland", "italy", "israel", "uae", "dubai", "new zealand", "south africa", "argentina", "chile", "colombia", "peru", "denmark", "norway", "finland", "belgium", "austria", "czech", "poland", "russia", "turkey", "egypt", "saudi", "korea", "taiwan", "malaysia", "thailand", "philippines", "indonesia", "vietnam", "romania", "portugal", "greece", "ukraine", "hungary", "slovakia", "slovenia", "croatia", "serbia", "bulgaria", "latvia", "lithuania", "estonia", "africa", "asia", "south america", "middle east"
-        ]
-        if any(x in location_str for x in non_us_keywords):
-            return False
-        # Keep if PA city or 'PA' in location
-        if any(city in location_str for city in PA_CITIES) or re.search(r',?\s*pa(\s|$|,)', location_str):
-            return True
-        # Keep if Remote or United States (with no specific city)
-        if re.fullmatch(r'\s*remote\s*', location_str) or re.fullmatch(r'\s*united states\s*', location_str):
-            return True
-        # If location is just 'Remote' or 'United States' (with no city), keep
-        if location_str.strip() in ["remote", "united states"]:
-            return True
-        # If location contains 'remote' and no non-US city, keep
-        if "remote" in location_str and not any(x in location_str for x in non_us_keywords):
-            return True
-        # If location contains 'usa' or 'us' and no non-US city, keep
-        if re.search(r'\busa\b|\bunited states\b|\bus\b', location_str) and not any(x in location_str for x in non_us_keywords):
-            return True
-        return False
-
-    all_jobs = [j for j in all_jobs if is_intern(j["title"]) and is_usa_location(j.get("location", ""))]
-    
-    # Deduplication: use compound key (company + title) to avoid duplicate roles at same company from different sources
-    seen = set()
-    deduped = []
-    for j in all_jobs:
-        # Create compound key: company name + role title (case-insensitive)
-        company = j["company"].lower().strip()
-        title = j["title"].lower().strip()
-        dedup_key = (company, title)
-        
-        if dedup_key not in seen:
-            seen.add(dedup_key)
-            deduped.append(j)
-    
-    all_jobs = sorted(deduped, key=lambda x: x.get("hours_ago", 999))
-
-    # Count filtered jobs by source
-    for j in all_jobs:
-        source = j.get("source", "Unknown")
-        if source in source_stats:
-            source_stats[source]["filtered"] += 1
-
-    print("Per-Source Summary:")
-    for source, stats in source_stats.items():
-        raw = stats["raw"]
-        filtered = stats["filtered"]
-        pct = f"({filtered}/{raw})" if raw > 0 else "(0/0)"
-        print(f"  {source}: {filtered} passing filters {pct}")
-    print()
-
+    raw, stats = collect_jobs(hours)
+    jobs = process_jobs(raw)
     if args.limit:
-        all_jobs = all_jobs[:args.limit]
+        jobs = jobs[:args.limit]
 
-    fresh = sum(1 for j in all_jobs if j.get("hours_ago", 999) <= 24)
-    print(f"\nTotal: {len(all_jobs)} unique internships | {fresh} posted in last 24h\n")
+    print("\nPer-source (candidates scraped):")
+    for label, n in stats.items():
+        print(f"  {label}: {n}")
+    fresh = sum(1 for j in jobs if j.get("hours_ago", 999) <= 24)
+    urgent = sum(1 for j in jobs if j.get("hours_ago", 999) < 6)
+    print(f"\nTotal: {len(jobs)} ranked roles | {fresh} in last 24h | {urgent} under 6h\n")
 
-    # Filter for outreach: only jobs posted within 96 hours (4 days) — gives more time for contact research
-    FRESHNESS_CUTOFF_H = 96
-    fresh_jobs = [j for j in all_jobs if j.get("hours_ago", 999) <= FRESHNESS_CUTOFF_H]
-    print(f"Jobs passing freshness check (≤{FRESHNESS_CUTOFF_H}h): {len(fresh_jobs)}/{len(all_jobs)}\n")
-
+    # Outreach populates in standard mode (tailored via Claude, with fallback)
+    # and in scrape-only mode (template drafts, no API key needed). --fresh
+    # skips it for speed.
     outreach = []
-    if args.scrape_only:
-        print("--scrape-only: skipping Claude API calls and outreach drafting\n")
-    else:
-        print("Researching contacts and drafting outreach...\n")
-        for j in fresh_jobs[:35]:
-            co = j.get("company", "")
-            role = j.get("title", "")
-            url = j.get("job_url", "")
-            if not co or not role:
-                continue
-            print(f"  {co} — {role} ({j.get('hours_ago', 999):.0f}h ago)")
-            contacts = find_contacts(co, role, client)
-            for c in contacts[:2]:
-                msgs = draft_messages(co, role, url, c, client)
-                email = c.get("guessed_email", "")
-                sent = ""
-                if email and not args.no_email:
-                    delay = random.randint(EMAIL_DELAY_MIN, EMAIL_DELAY_MAX)
-                    print(f"    Waiting {delay//60}m{delay%60}s before emailing {email}...")
-                    time.sleep(delay)
-                    ok = send_email(gmail, email, msgs.get("email_subject", ""), msgs.get("email_body", ""))
-                    sent = "Sent" if ok else "Failed"
-                elif email:
-                    sent = "Drafted — send manually"
-                else:
-                    sent = "No email — LinkedIn only"
-                outreach.append({
-                    "company": co,
-                    "role": role,
-                    "name": c.get("name", ""),
-                    "title": c.get("title", ""),
-                    "reason": c.get("reason", ""),
-                    "linkedin_url": c.get("linkedin_search_url", ""),
-                    "linkedin_msg": msgs.get("linkedin_message", ""),
-                    "email": email,
-                    "email_subj": msgs.get("email_subject", ""),
-                    "email_body": msgs.get("email_body", ""),
-                    "email_sent": sent
-                })
+    if not fresh_mode and jobs:
+        outreach = build_outreach(jobs, client, config.OUTREACH_TOP_N)
 
-    fname, wb = write_excel(all_jobs, outreach)
+    fname, wb = write_excel(jobs, outreach)
 
-    # ----------------------------------------------------------------
-    # Cold Outreach module — runs after job scraping, adds its own tab
-    # ----------------------------------------------------------------
-    cold_contacts = []
-    if not args.scrape_only:
+    if do_claude:
         try:
             from cold_outreach import run_cold_outreach, build_config as _co_cfg
             co_config = _co_cfg()
             if co_config.get("cold_outreach_enabled", True):
-                cold_contacts = run_cold_outreach(wb, co_config, gmail_service=gmail)
-            else:
-                print("[Cold Outreach] Disabled via COLD_OUTREACH_ENABLED=false")
+                run_cold_outreach(wb, co_config, gmail_service=get_gmail())
         except Exception as e:
-            print(f"WARNING: [Cold Outreach] Module error (main pipeline unaffected): {e}")
+            print(f"WARNING: [Cold Outreach] {e}")
 
-    # Save workbook (cold outreach sheet already appended above)
     wb.save(fname)
+
+    if not fresh_mode:
+        try:
+            refresh_watchlist_cache()
+        except Exception as e:
+            print(f"WARNING: [watchlist refresh] {e}")
 
     print("\n" + "=" * 60)
     print("  COMPLETE")
-    print(f"  {len(all_jobs)} jobs | {fresh} fresh | {len(outreach)} outreach drafted")
-    if cold_contacts:
-        print(f"  Cold Outreach: {len(cold_contacts)} new contacts added")
+    print(f"  {len(jobs)} roles | {fresh} fresh | {len(outreach)} outreach drafted")
     print(f"  File: {fname}")
-    print("\n  NEXT STEPS:")
-    print("  1. Open file — start with GREEN rows (< 6h old)")
-    print("  2. Go to Outreach tab — send LinkedIn messages (30 sec each)")
-    print("  3. Run tomorrow morning: python job_pipeline_full.py --hours 24")
     print("=" * 60 + "\n")
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     main()

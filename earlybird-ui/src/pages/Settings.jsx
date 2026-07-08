@@ -121,7 +121,7 @@ export default function Settings({ settings, onSave, onRun }) {
       <Card title="Job Preferences">
         <Field
           label="School / University"
-          placeholder="Temple University"
+          placeholder="Your University"
           value={school}
           onChange={e => setSchool(e.target.value)}
           hint="Used in outreach message personalization"

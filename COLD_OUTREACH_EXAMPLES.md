@@ -187,8 +187,8 @@ Given your focus on developer experience with AI, I'd love to chat about
 how I could contribute. Would 15 minutes next week work?
 
 Thanks,
-Anishka Kakade
-anishkakade.vercel.app | anishka.s.kakade@gmail.com
+Your Name
+yourportfolio.example.com | you@example.com
 ```
 
 ### Draft 2: EchoAI
@@ -202,15 +202,15 @@ I came across EchoAI while researching RAG implementations at early-stage
 companies. Your approach to embedding lifecycle management caught my eye
 because it solves the exact bottleneck I hit building semantic search.
 
-I'm a senior CS student at Temple graduating in December 2026, and I've
+I'm a an early-career software engineer, and I've
 been building full-stack AI systems: Python backends, React frontends,
 working with vector DBs and APIs. I'd be excited to help you scale.
 
 Could we grab 20 minutes sometime this week?
 
 Thanks,
-Anishka Kakade
-anishkakade.vercel.app | anishka.s.kakade@gmail.com
+Your Name
+yourportfolio.example.com | you@example.com
 ```
 
 ---
@@ -280,8 +280,8 @@ Given your focus on developer experience with AI, I'd love to chat about
 how I could contribute. Would 15 minutes next week work?
 
 Thanks,
-Anishka Kakade
-anishkakade.vercel.app | anishka.s.kakade@gmail.com
+Your Name
+yourportfolio.example.com | you@example.com
 ```
 
 ---
@@ -505,7 +505,7 @@ Aim for:
 
 4. **Link to Proof**
    - Always include portfolio/GitHub link
-   - Make it clickable: https://anishkakade.vercel.app
+   - Make it clickable: https://yourportfolio.example.com
 
 5. **Keep Subject Lines Short**
    - Under 50 characters

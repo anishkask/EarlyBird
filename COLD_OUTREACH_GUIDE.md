@@ -139,9 +139,9 @@ APOLLO_API_KEY=...               # From apollo.io/settings
 
 **Optional:**
 ```bash
-YOUR_NAME=Anishka Kakade              # Used in email signature
-YOUR_EMAIL=anishka@...                # Used in email signature
-YOUR_SCHOOL=Temple University         # Used in email signature
+YOUR_NAME=Your Name              # Used in email signature
+YOUR_EMAIL=you@example.com                # Used in email signature
+YOUR_SCHOOL=         # Used in email signature
 ```
 
 ### Configuration Options
@@ -295,13 +295,13 @@ Your email should have 3 parts:
 ```
 Hi [First Name],
 
-I'm a Temple University CS student interested in joining [Company].
+I'm a CS student interested in joining [Company].
 Your product is amazing and I think I'd be a great fit.
 
 Let me know if you'd like to chat!
 
 Best,
-Anishka
+Your Name
 ```
 
 **✅ Good:**
@@ -315,8 +315,8 @@ Given your focus on [specific area], I think I could help with [specific contrib
 Would you have 15 minutes next week to discuss?
 
 Thanks,
-Anishka Kakade
-anishkakade.vercel.app | anishka.s.kakade@gmail.com
+Your Name
+yourportfolio.example.com | you@example.com
 ```
 
 ### Do's & Don'ts
@@ -340,7 +340,7 @@ anishkakade.vercel.app | anishka.s.kakade@gmail.com
 ### The Claude Email Generator
 
 EarlyBird's Cold Outreach module **auto-generates personalized emails** via Claude API using:
-- Your background (CS student at Temple, graduating Dec 2026)
+- Your background (from the MY_BACKGROUND environment variable)
 - Your technical stack
 - Your key projects
 - Company info from Apollo (size, industry, website)

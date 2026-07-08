@@ -238,7 +238,9 @@ def keyword_match(title: str) -> bool:
         if all(p in t for p in parts):
             return True
     # Broad fallback: any engineering/developer/tech intern title
-    tech_words = ["engineer", "developer", "software", "data", "ml", "ai",
+    tech_words = ["engineer", "developer", "software", "data", "ml", "machine learning",
+                  "agentic", "full stack", " full-stack", "ai", "data engineering", "qa engineering", 
+                  "software developer", "software development", "computer science",
                   "backend", "frontend", "fullstack", "cloud", "platform",
                   "devops", "security", "automation", "analytics", "product"]
     return any(w in t for w in tech_words)

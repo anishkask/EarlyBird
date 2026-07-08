@@ -745,6 +745,22 @@ def run_cold_outreach(
 
     new_companies = validated
 
+    # Write discovered companies to cache so build_dynamic_watchlist() can use them
+    co_cache_path = DATA_DIR / "cold_outreach_cache.json"
+    try:
+        existing_cache: list = []
+        if co_cache_path.exists():
+            existing_cache = _load_json(co_cache_path, {}).get("companies", [])
+        existing_names = {c.get("name", "").lower().strip() for c in existing_cache}
+        new_entries = [
+            {"name": c["name"], "website": c["website"], "vc_source": c.get("vc_source", "")}
+            for c in validated
+            if c.get("name", "").lower().strip() not in existing_names
+        ]
+        _save_json(co_cache_path, {"companies": existing_cache + new_entries})
+    except Exception as e:
+        logger.warning(f"[Cold Outreach] Could not update cold_outreach_cache.json: {e}")
+
     if test_mode:
         new_companies = new_companies[:test_company_limit]
     elif len(new_companies) > max_per_day:

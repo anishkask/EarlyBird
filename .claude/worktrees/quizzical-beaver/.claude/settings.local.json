@@ -19,7 +19,15 @@
       "Bash(npm create:*)",
       "Bash(npm install:*)",
       "Bash(npx tailwindcss:*)",
-      "mcp__Claude_Preview__preview_start"
+      "mcp__Claude_Preview__preview_start",
+      "Bash(python cold_outreach.py --limit 3)",
+      "Bash(npm run:*)",
+      "Bash(curl -s http://localhost:5173)",
+      "Bash(grep -v \"^$\")",
+      "WebFetch(domain:www.fjlabs.com)",
+      "WebFetch(domain:pioneer.app)",
+      "WebSearch",
+      "WebFetch(domain:www.eranyc.com)"
     ]
   }
 }
