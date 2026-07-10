@@ -175,7 +175,8 @@ class SettingsRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Background pipeline execution
 # ---------------------------------------------------------------------------
-def _background_run(run_id: str, api_key: str, hours: int, cold_outreach: bool, cold_outreach_limit: int):
+def _background_run(run_id: str, api_key: str, hours: int, cold_outreach: bool, cold_outreach_limit: int,
+                    target_locations: List[str], role_keywords: List[str], skills: List[str]):
     """Run the pipeline in a worker thread. The api_key lives only in this
     frame for the duration of the run and is never stored in _runs."""
     with _lock:
@@ -188,6 +189,9 @@ def _background_run(run_id: str, api_key: str, hours: int, cold_outreach: bool, 
             hours=hours,
             cold_outreach_enabled=cold_outreach,
             cold_outreach_limit=cold_outreach_limit,
+            target_locations=target_locations,
+            role_keywords=role_keywords,
+            skills=skills,
         )
         with _lock:
             if run_id in _runs:
@@ -235,7 +239,8 @@ async def run_pipeline(req: PipelineRequest, request: Request):
     # Start the worker outside the lock. The key is passed by value only.
     threading.Thread(
         target=_background_run,
-        args=(run_id, req.anthropic_api_key, req.hours, req.cold_outreach, req.cold_outreach_limit),
+        args=(run_id, req.anthropic_api_key, req.hours, req.cold_outreach, req.cold_outreach_limit,
+              req.target_locations, req.role_keywords, req.skills),
         daemon=True,
     ).start()
 

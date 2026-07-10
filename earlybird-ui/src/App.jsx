@@ -143,6 +143,7 @@ export default function App() {
         <RunModal
           apiUrl={API_URL}
           apiKey={settings.anthropicApiKey}
+          settings={settings}
           onClose={() => setRunOpen(false)}
           onComplete={handleRunComplete}
         />

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-export default function RunModal({ apiUrl, apiKey: propApiKey, onClose, onComplete }) {
+export default function RunModal({ apiUrl, apiKey: propApiKey, settings, onClose, onComplete }) {
   const [hours, setHours] = useState(72)
   const [coldOutreach, setColdOutreach] = useState(true)
   const [localApiKey, setLocalApiKey] = useState('')
@@ -74,6 +74,9 @@ export default function RunModal({ apiUrl, apiKey: propApiKey, onClose, onComple
           hours: Number(hours),
           cold_outreach: coldOutreach,
           cold_outreach_limit: 10,
+          target_locations: settings?.targetLocations || [],
+          role_keywords: settings?.roleKeywords || [],
+          skills: settings?.skills || [],
         }),
       })
       if (!res.ok) {

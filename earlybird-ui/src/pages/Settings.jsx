@@ -124,25 +124,28 @@ export default function Settings({ settings, onSave, onRun }) {
           placeholder="Your University"
           value={school}
           onChange={e => setSchool(e.target.value)}
-          hint="Used in outreach message personalization"
+          hint="Not yet used by web runs — outreach drafts use the server's .env profile"
         />
         <Field
           label="Target Locations (comma separated)"
-          placeholder="Philadelphia, Remote"
+          placeholder="Philadelphia, New York"
           value={locations}
           onChange={e => setLocations(e.target.value)}
+          hint="Only jobs in these locations are kept; remote and unlisted always pass. Empty = US-wide"
         />
         <Field
           label="Role Keywords (comma separated)"
           placeholder="software engineering, backend, AI"
           value={keywords}
           onChange={e => setKeywords(e.target.value)}
+          hint="Added to relevance matching and ranking for the run"
         />
         <Field
           label="Skills (comma separated)"
           placeholder="Python, React, FastAPI"
           value={skills}
           onChange={e => setSkills(e.target.value)}
+          hint="Jobs mentioning these rank higher"
         />
         <div className="border-t border-slate-100 pt-2 space-y-0">
           <Toggle label="Enable Cold Outreach"       value={cold}   onChange={setCold} />

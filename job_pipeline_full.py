@@ -122,9 +122,11 @@ def _title_maybe_relevant(title):
     return any(k in t for k in _TITLE_PREFILTER)
 
 
-def is_relevant(title, desc=""):
+def is_relevant(title, desc="", extra_keywords=None):
     """A role is relevant if any profile keyword appears in title or description."""
     text = (title + " " + desc).lower()
+    if extra_keywords and any(k in text for k in extra_keywords):
+        return True
     return any(k in text for k in _ALL_KEYWORDS)
 
 
@@ -136,6 +138,23 @@ def is_usa_location(loc):
     if any(x in s for x in _NON_US):
         return False
     return True
+
+
+# Locations that count as remote-friendly and always pass a target-location
+# filter. Deliberately excludes bare "us" (substring-matches "Austin").
+_REMOTE_TOKENS = ["remote", "anywhere", "united states", "usa", "work from home", "wfh", "nationwide"]
+
+
+def matches_target_locations(loc, targets):
+    """True if loc is blank/remote or contains one of the user's target locations."""
+    if not targets:
+        return True
+    if not loc or not isinstance(loc, str):
+        return True  # blank location -> keep (better recall)
+    s = loc.lower()
+    if any(t in s for t in _REMOTE_TOKENS):
+        return True
+    return any(t.lower() in s for t in targets if t)
 
 
 def role_type(title, desc=""):
@@ -193,7 +212,7 @@ def is_entry_mid(title):
     return any(k in t for k in config.ENTRY_MID_SIGNALS)
 
 
-def rank_score(j):
+def rank_score(j, extra_keywords=None):
     """
     Attainability-aware ranking. Rewards entry/mid level + smaller company +
     stack match + freshness; penalizes residual seniority and large boards.
@@ -207,6 +226,8 @@ def rank_score(j):
     s += sum(3 for kw in config.PROFILE_KEYWORDS["high"] if kw in text)
     s += sum(2 for kw in config.PROFILE_KEYWORDS["core"] if kw in text)
     s += sum(1 for kw in config.PROFILE_KEYWORDS["bonus"] if kw in text)
+    if extra_keywords:
+        s += sum(2 for kw in extra_keywords if kw in text)
 
     # Freshness (reduced weight so it does not dominate attainability)
     ha = j.get("hours_ago", 999)
@@ -612,12 +633,18 @@ def collect_jobs(hours):
     return jobs, stats
 
 
-def process_jobs(raw):
-    """Filter to relevant paid US/remote roles, rank, and dedupe across sources."""
+def process_jobs(raw, extra_keywords=None, target_locations=None):
+    """Filter to relevant paid US/remote roles, rank, and dedupe across sources.
+
+    extra_keywords/target_locations are optional per-run overrides from the web
+    UI; passed explicitly (never via module globals) so concurrent runs stay
+    isolated.
+    """
+    extra_keywords = [k.strip().lower() for k in (extra_keywords or []) if k and k.strip()]
     processed = []
     for j in raw:
         title, desc = j.get("title", ""), j.get("description", "")
-        if not is_relevant(title, desc):
+        if not is_relevant(title, desc, extra_keywords):
             continue
         if is_excluded_company(j.get("company", "")):
             continue
@@ -629,6 +656,8 @@ def process_jobs(raw):
             continue
         if not is_usa_location(j.get("location", "")):
             continue
+        if not matches_target_locations(j.get("location", ""), target_locations):
+            continue
         rt = role_type(title, desc)
         if rt == "intern" and not config.INCLUDE_INTERNSHIPS:
             continue
@@ -636,7 +665,7 @@ def process_jobs(raw):
         j["requires_degree"] = requires_degree(title, desc)
         if j["requires_degree"] and config.DEGREE_REQUIREMENT_MODE == "filter":
             continue
-        j["rank_score"] = rank_score(j)
+        j["rank_score"] = rank_score(j, extra_keywords)
         j["score"] = int(j["rank_score"])  # kept for the web frontend
         j["fresh"] = fresh_flag(j.get("hours_ago", 999))
         processed.append(j)
@@ -869,7 +898,8 @@ def write_excel(jobs, outreach):
 # API entry point (used by api.py)
 # ===========================================================================
 
-def run_pipeline_api(api_key, hours=None, cold_outreach_enabled=True, cold_outreach_limit=10):
+def run_pipeline_api(api_key, hours=None, cold_outreach_enabled=True, cold_outreach_limit=10,
+                     target_locations=None, role_keywords=None, skills=None):
     """Run the pipeline and return structured JSON. Key used only for this call."""
     import anthropic
     client = anthropic.Anthropic(api_key=api_key)
@@ -879,8 +909,10 @@ def run_pipeline_api(api_key, hours=None, cold_outreach_enabled=True, cold_outre
     print(f"  Pipeline run - {datetime.now().strftime('%Y-%m-%d %H:%M')} ({hours}h window)")
     print(f"{'='*60}\n")
 
+    extra_keywords = (role_keywords or []) + (skills or [])
+
     raw, _ = collect_jobs(hours)
-    jobs = process_jobs(raw)
+    jobs = process_jobs(raw, extra_keywords=extra_keywords, target_locations=target_locations)
     fresh = sum(1 for j in jobs if j.get("hours_ago", 999) <= 24)
     print(f"\nTotal: {len(jobs)} ranked roles | {fresh} posted in last 24h\n")
 
