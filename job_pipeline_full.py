@@ -26,6 +26,7 @@ import os
 import sys
 import re
 import json
+import html
 import time
 import argparse
 import warnings
@@ -60,7 +61,9 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-OUTREACH_MODEL = "claude-sonnet-4-20250514"
+# claude-sonnet-4-20250514 was retired by Anthropic (API returns 404).
+# Sonnet 5 is its documented drop-in replacement at the same price tier.
+OUTREACH_MODEL = "claude-sonnet-5"
 WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
 
 # ===========================================================================
@@ -91,6 +94,9 @@ _NON_US = [
     "poland", "romania", "portugal", "lisbon", "ukraine", "korea", "taiwan",
     "philippines", "indonesia", "vietnam", "emea", "apac", "latam",
 ]
+# Matched against _norm_loc() output; " india " is word-bounded so it cannot
+# match "Indianapolis, Indiana". Multi-word names match the normalized text.
+_NON_US = [x if x != "india" else " india " for x in _NON_US]
 
 _DEGREE_RE = re.compile(
     r"(bachelor'?s?\s+degree\s+(is\s+)?required"
@@ -130,11 +136,17 @@ def is_relevant(title, desc="", extra_keywords=None):
     return any(k in text for k in _ALL_KEYWORDS)
 
 
+def _norm_loc(loc):
+    """Lowercase, punctuation collapsed to spaces, space-padded -- so short
+    tokens can be word-bounded ("india" must not match "Indianapolis, Indiana")."""
+    return " " + re.sub(r"[^a-z0-9]+", " ", (loc or "").lower()).strip() + " "
+
+
 def is_usa_location(loc):
     """Keep US, remote, and unknown locations; drop clearly non-US ones."""
     if not loc or not isinstance(loc, str):
         return True  # unknown location -> keep (better recall)
-    s = loc.lower()
+    s = _norm_loc(loc)
     if any(x in s for x in _NON_US):
         return False
     return True
@@ -143,6 +155,44 @@ def is_usa_location(loc):
 # Locations that count as remote-friendly and always pass a target-location
 # filter. Deliberately excludes bare "us" (substring-matches "Austin").
 _REMOTE_TOKENS = ["remote", "anywhere", "united states", "usa", "work from home", "wfh", "nationwide"]
+
+# Remote markers and region-restriction parsing for location_accept().
+_REMOTE_MARKERS = ["remote", "work from home", "wfh", "distributed", "anywhere"]
+_REMOTE_REGION_RE = re.compile(r"remote\s*\(([^)]*)\)")
+
+
+def _remote_us_eligible(s):
+    """True if the (lowercase) location is remote AND US-eligible.
+    "Remote (IN)" / "Remote (DE)" style restrictions to non-US regions fail;
+    unrestricted "Remote" or any restriction group mentioning the US passes."""
+    if not any(m in s for m in _REMOTE_MARKERS):
+        return False
+    groups = _REMOTE_REGION_RE.findall(s)
+    if not groups:
+        return True  # unrestricted remote
+    for g in groups:
+        tokens = re.split(r"[^a-z0-9]+", g)
+        if ("us" in tokens or "usa" in tokens or "united states" in g
+                or "worldwide" in g or "anywhere" in g or "americas" in g
+                or "north america" in g or "global" in g):
+            return True
+    return False
+
+
+def location_accept(loc):
+    """Config-driven geography gate. Returns "remote", "metro", "unknown"
+    (blank location, kept for recall), or None (drop).
+    Remote is the top preference and gets a rank boost downstream; onsite or
+    hybrid is accepted only in config.ACCEPTED_METROS."""
+    if not loc or not isinstance(loc, str) or not loc.strip():
+        return "unknown"
+    s = loc.lower()
+    if config.ACCEPT_REMOTE and _remote_us_eligible(s):
+        return "remote"
+    n = _norm_loc(loc)
+    if any(f" {m} " in n for m in config.ACCEPTED_METROS):
+        return "metro"
+    return None
 
 
 def matches_target_locations(loc, targets):
@@ -157,17 +207,73 @@ def matches_target_locations(loc, targets):
     return any(t.lower() in s for t in targets if t)
 
 
+# Word-bounded so "internal tools" / "international team" can never classify
+# a role as an internship -- the old substring check silently dropped real
+# full-time roles on every prior run.
+_INTERN_RE = re.compile(r"\b(interns?|internships?|co-?op|co op)\b")
+
+
 def role_type(title, desc=""):
-    """Classify a role: intern, contract-to-hire, contract, or full-time."""
+    """Classify employment type: intern, apprenticeship (incl. fellowship /
+    returnship), contract-to-hire, contract (incl. freelance/temp/1099/W2),
+    part-time, or full-time."""
     full = (title + " " + desc).lower()
     t = title.lower()
-    if "intern" in full or "co-op" in full or "co op" in full:
+    if _INTERN_RE.search(full):
         return "intern"
+    if "apprentice" in t or "fellowship" in t or "returnship" in t:
+        return "apprenticeship"
     if "contract to hire" in t or "contract-to-hire" in t or "c2h" in t or "contract-to-perm" in t:
         return "contract-to-hire"
-    if any(k in t for k in ["contract", "contractor", "freelance", "temporary"]):
+    if (any(k in t for k in ["contract", "contractor", "freelance", "1099", "w-2"])
+            or re.search(r"\b(temp|temporary|w2)\b", t)):
         return "contract"
+    if "part-time" in t or "part time" in t:
+        return "part-time"
     return "full-time"
+
+
+# --- Internship guard (config.INCLUDE_INTERNSHIPS gates the whole family) ---
+# Candidate is NOT an enrolled student until Fall 2027, so:
+#   - explicit unpaid / for-credit postings are dropped;
+#   - explicit current-enrollment requirements are dropped;
+#   - everything ambiguous is KEPT and flagged in the Notes column -- this
+#     guard must never become a silent-suppression bug.
+_UNPAID_MARKERS = [
+    "unpaid", "for credit", "academic credit", "course credit",
+    "college credit", "credit only",
+]
+_ENROLLMENT_MARKERS = [
+    "currently enrolled", "must be enrolled", "enrolled in a degree",
+    "enrolled in an accredited", "enrolled at an accredited",
+    "must be a current student", "current student status",
+    "currently pursuing a bachelor", "currently pursuing a degree",
+    "currently pursuing an undergraduate", "currently pursuing a master",
+    "actively pursuing a degree", "must be pursuing a degree",
+    "receive academic credit", "eligible to receive credit",
+    "returning to school in", "returning to a degree program",
+]
+_PAID_MARKERS = ["$", "/hr", "/hour", "per hour", "hourly", "stipend",
+                 "paid internship", "compensation", "salary"]
+_OPEN_MARKERS = ["open to non-students", "not required to be enrolled",
+                 "no enrollment requirement", "recent grad", "recent graduates",
+                 "returnship"]
+
+
+def internship_guard(title, desc):
+    """For intern-classified roles: (keep, type_label, note).
+    Drops only on explicit unpaid/credit or enrollment-required language;
+    ambiguity keeps the role with a verification note."""
+    d = f"{title} {desc}".lower()
+    if any(k in d for k in _UNPAID_MARKERS):
+        return False, "", ""
+    if any(k in d for k in _ENROLLMENT_MARKERS):
+        return False, "", ""
+    label = "internship-paid" if any(k in d for k in _PAID_MARKERS) else "internship"
+    note = "" if any(k in d for k in _OPEN_MARKERS) else "verify enrollment requirement"
+    if label == "internship" and note:
+        note = "verify pay & enrollment requirement"
+    return True, label, note
 
 
 def requires_degree(title, desc=""):
@@ -192,22 +298,67 @@ def years_required(text):
     return max(yrs) if yrs else 0
 
 
+def _norm_title(title):
+    """Lowercase, punctuation collapsed to spaces, space-padded -- so short
+    exclude tokens like " lead " or " sre " are word-bounded and cannot match
+    inside longer words ("leadership") or across punctuation ("Lead, Backend")."""
+    return " " + re.sub(r"[^a-z0-9]+", " ", (title or "").lower()).strip() + " "
+
+
 def is_excluded_seniority(title):
+    """Titles above the entry/mid ceiling (config.SENIORITY_EXCLUDE) are dropped."""
     t = (title or "").lower()
-    return any(k in t for k in config.SENIORITY_EXCLUDE)
+    # "Member of Technical Staff" is an entry-possible AI-startup title; its
+    # "staff" is not a seniority marker. "Senior Member of Technical Staff"
+    # still matches on the remaining "senior". Likewise "Fellowship" is a
+    # program name, not the "Distinguished Fellow" seniority title.
+    t = t.replace("member of technical staff", "")
+    t = t.replace("fellowship", "")
+    return any(k in _norm_title(t) for k in config.SENIORITY_EXCLUDE)
 
 
 def is_excluded_function(title):
-    t = (title or "").lower()
-    return any(k in t for k in config.FUNCTION_EXCLUDE)
+    """Off-target functions (config.FUNCTION_EXCLUDE): security, IT, QA, etc."""
+    return any(k in _norm_title(title) for k in config.FUNCTION_EXCLUDE)
+
+
+def is_excluded_ops(title):
+    """Ops/infra/database-ops roles are off-track (config.OPS_INFRA_EXCLUDE).
+    Title is padded with spaces so word-bounded tokens like " dba " work."""
+    t = f" {(title or '').lower()} "
+    return any(k in t for k in config.OPS_INFRA_EXCLUDE)
+
+
+def title_allowed(title):
+    """True if the title matches an AI-startup pattern (TRACK_TITLE_ALLOW).
+    These pass the track gate AND count as relevant even with a sparse
+    description (e.g. "Member of Technical Staff" with no keyword overlap)."""
+    t = f" {(title or '').lower()} "
+    return any(a in t for a in config.TRACK_TITLE_ALLOW)
+
+
+def title_on_track(title, extra_keywords=None):
+    """The title itself must carry a track signal (config.TRACK_TITLE_KEYWORDS)
+    or match an AI-startup pattern (config.TRACK_TITLE_ALLOW). Description
+    keywords still boost rank but cannot rescue an off-track title."""
+    if title_allowed(title):
+        return True
+    t = f" {(title or '').lower()} "
+    if any(k in t for k in config.TRACK_TITLE_KEYWORDS):
+        return True
+    if extra_keywords and any(k in t for k in extra_keywords):
+        return True
+    return False
 
 
 def is_excluded_company(company):
+    """Mega-caps and excluded firms (config.EXCLUDE_COMPANIES) are dropped."""
     c = (company or "").lower()
     return any(k in c for k in config.EXCLUDE_COMPANIES)
 
 
 def is_entry_mid(title):
+    """Explicit entry/mid title signal (config.ENTRY_MID_SIGNALS); rank bonus."""
     t = (title or "").lower()
     return any(k in t for k in config.ENTRY_MID_SIGNALS)
 
@@ -254,12 +405,18 @@ def rank_score(j, extra_keywords=None):
         elif bs > config.LARGE_BOARD_THRESHOLD:
             s -= 5
 
-    # Paid role type
+    # Employment type: contract family leads (income speed), then full-time.
     rt = j.get("role_type", "full-time")
-    if rt in ("full-time", "contract-to-hire"):
+    if rt in ("contract", "contract-to-hire"):
+        s += 4
+    elif rt == "full-time":
         s += 2
-    elif rt == "contract":
+    elif rt in ("part-time", "apprenticeship"):
         s += 1
+
+    # Remote is the top geographic preference
+    if j.get("work_mode") == "remote":
+        s += 4
 
     # Penalties
     if j.get("requires_degree") and config.DEGREE_REQUIREMENT_MODE == "deprioritize":
@@ -279,11 +436,14 @@ def fresh_flag(ha):
 
 
 def job(title, company, location, url, dt, source, desc="", board_size=None):
+    """Normalize one posting into the pipeline's common job dict."""
     ha = hours_ago(dt)
+    # 1500 chars so the internship guard can see enrollment/pay language,
+    # which usually sits deep in the posting.
     return {
         "title": title, "company": company, "location": location,
         "job_url": url, "hours_ago": ha, "source": source,
-        "description": (desc or "")[:600], "board_size": board_size,
+        "description": (desc or "")[:1500], "board_size": board_size,
     }
 
 
@@ -404,6 +564,8 @@ ASHBY_SLUGS = list(config.ASHBY_COMPANIES)
 # ===========================================================================
 
 def scrape_greenhouse(max_h):
+    """Greenhouse public board API, one request per watchlist company.
+    Undated postings fall back to a 72h-old timestamp rather than being lost."""
     out = []
     for slug, name in GREENHOUSE_SLUGS:
         try:
@@ -443,6 +605,8 @@ def scrape_greenhouse(max_h):
 
 
 def scrape_lever(max_h):
+    """Lever public postings API, one request per watchlist company.
+    Undated postings fall back to a 72h-old timestamp rather than being lost."""
     out = []
     for slug, name in LEVER_SLUGS:
         try:
@@ -503,6 +667,10 @@ def scrape_ashby(max_h):
                         dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
                     except ValueError:
                         pass
+                if dt is None:
+                    # Same fallback as Greenhouse/Lever: an undated posting is
+                    # treated as 72h old, not silently dropped.
+                    dt = datetime.now(timezone.utc) - timedelta(hours=72)
                 if hours_ago(dt) > max_h:
                     continue
                 loc = j.get("location") or ("Remote" if j.get("isRemote") else "")
@@ -539,6 +707,10 @@ def scrape_remoteok(max_h):
                     dt = datetime.fromisoformat(str(j["date"]).replace("Z", "+00:00"))
                 except ValueError:
                     pass
+            if dt is None:
+                # Same fallback as Greenhouse/Lever: an undated posting is
+                # treated as 72h old, not silently dropped.
+                dt = datetime.now(timezone.utc) - timedelta(hours=72)
             if hours_ago(dt) > max_h:
                 continue
             tags = j.get("tags", []) or []
@@ -568,6 +740,111 @@ def scrape_wellfound(max_h=None):
                                "Remote", "https://wellfound.com" + a["href"], dt, "Wellfound"))
     except Exception as e:
         print(f"WARNING: [Wellfound] {e}")
+    return out
+
+
+def scrape_remotive(max_h):
+    """Remotive's documented public API (remote-only board). Carries an
+    employment-type field (contract/freelance/part_time) and a US-eligibility
+    field, so it is the main remote/contract supply. Single polite request."""
+    out = []
+    try:
+        r = requests.get("https://remotive.com/api/remote-jobs?category=software-dev",
+                         headers=HEADERS, timeout=12)
+        if r.status_code != 200:
+            print(f"WARNING: [Remotive] HTTP {r.status_code}")
+            return out
+        for j in r.json().get("jobs", []) or []:
+            title = j.get("title", "")
+            if not _title_maybe_relevant(title):
+                continue
+            region = (j.get("candidate_required_location") or "").strip()
+            rl = region.lower()
+            if rl and not any(k in rl for k in ["usa", "united states", "americas",
+                                                "worldwide", "anywhere", "north america"]):
+                continue  # remote, but not US-eligible
+            dt = None
+            pub = j.get("publication_date")
+            if pub:
+                try:
+                    dt = datetime.fromisoformat(str(pub).replace("Z", "+00:00"))
+                except ValueError:
+                    pass
+            if dt is None:
+                # Same fallback as Greenhouse/Lever: an undated posting is
+                # treated as 72h old, not silently dropped.
+                dt = datetime.now(timezone.utc) - timedelta(hours=72)
+            if hours_ago(dt) > max_h:
+                continue
+            desc = BeautifulSoup(j.get("description", ""), "html.parser").get_text()
+            loc = f"Remote ({region})" if region else "Remote"
+            jd = job(title, j.get("company_name", ""), loc, j.get("url", ""),
+                     dt, "Remotive", desc)
+            # The API's employment type is authoritative; it beats title inference.
+            hint = {"contract": "contract", "freelance": "contract",
+                    "part_time": "part-time", "internship": "intern"}.get(j.get("job_type", ""))
+            if hint:
+                jd["role_type_hint"] = hint
+            out.append(jd)
+    except Exception as e:
+        print(f"WARNING: [Remotive] {e}")
+    return out
+
+
+def scrape_yc(max_h):
+    """YC Work at a Startup. robots.txt permits all crawling; listings are
+    embedded server-side as Inertia data-page JSON (one polite request; the
+    server requires a browser-style Accept header or it returns 406).
+    Postings carry no timestamp, so a conservative 48h age is assumed
+    (Wellfound precedent) -- YC roles never flag Fresh and are skipped
+    entirely by windows under 48h such as --fresh."""
+    out = []
+    yc_headers = dict(HEADERS)
+    yc_headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    dt = datetime.now(timezone.utc) - timedelta(hours=48)  # no per-job timestamp
+    if hours_ago(dt) > max_h:
+        return out
+    # Two queries: the default eng set skews SF, remote=yes fills the remote
+    # supply. Deduped by job id; polite pause between requests.
+    urls = [
+        "https://www.workatastartup.com/jobs?role=eng",
+        "https://www.workatastartup.com/jobs?role=eng&remote=yes",
+    ]
+    seen = set()
+    for i, u in enumerate(urls):
+        if i:
+            time.sleep(0.5)
+        try:
+            r = requests.get(u, headers=yc_headers, timeout=12)
+            if r.status_code != 200:
+                print(f"WARNING: [YC WaaS] HTTP {r.status_code}")
+                continue
+            m = re.search(r'data-page="([^"]+)"', r.text)
+            if not m:
+                print("WARNING: [YC WaaS] no embedded job data found (markup changed?)")
+                continue
+            payload = json.loads(html.unescape(m.group(1)))
+            for j in payload.get("props", {}).get("jobs", []) or []:
+                jid = j.get("id")
+                if jid in seen:
+                    continue
+                seen.add(jid)
+                title = j.get("title", "")
+                role_typ = j.get("roleType", "")
+                if role_typ in ("Hardware", "Mechanical", "Engineering manager"):
+                    continue
+                if j.get("jobType") == "Intern" and not config.INCLUDE_INTERNSHIPS:
+                    continue
+                if not _title_maybe_relevant(title):
+                    continue
+                url = f"https://www.workatastartup.com/jobs/{jid}" if jid else ""
+                desc = " ".join(x for x in (role_typ, j.get("companyOneLiner", ""),
+                                            j.get("salary") or "",
+                                            "internship" if j.get("jobType") == "Intern" else "") if x)
+                out.append(job(title, j.get("companyName", ""), j.get("location", ""),
+                               url, dt, "YC WaaS", desc))
+        except Exception as e:
+            print(f"WARNING: [YC WaaS] {e}")
     return out
 
 
@@ -618,6 +895,8 @@ def collect_jobs(hours):
         ("Lever ATS",       "lever",      scrape_lever,      {"max_h": hours}),
         ("Ashby ATS",       "ashby",      scrape_ashby,      {"max_h": hours}),
         ("RemoteOK",        "remoteok",   scrape_remoteok,   {"max_h": hours}),
+        ("Remotive",        "remotive",   scrape_remotive,   {"max_h": hours}),
+        ("YC Work at a Startup", "yc",    scrape_yc,         {"max_h": hours}),
         ("Wellfound",       "wellfound",  scrape_wellfound,  {"max_h": hours}),
         ("LinkedIn/Indeed", "jobspy",     scrape_jobspy,     {"max_h": hours}),
     ]
@@ -644,11 +923,15 @@ def process_jobs(raw, extra_keywords=None, target_locations=None):
     processed = []
     for j in raw:
         title, desc = j.get("title", ""), j.get("description", "")
-        if not is_relevant(title, desc, extra_keywords):
+        if not (is_relevant(title, desc, extra_keywords) or title_allowed(title)):
+            continue
+        if not title_on_track(title, extra_keywords):
             continue
         if is_excluded_company(j.get("company", "")):
             continue
         if is_excluded_function(title):
+            continue
+        if is_excluded_ops(title):
             continue
         if is_excluded_seniority(title):
             continue
@@ -658,9 +941,19 @@ def process_jobs(raw, extra_keywords=None, target_locations=None):
             continue
         if not matches_target_locations(j.get("location", ""), target_locations):
             continue
-        rt = role_type(title, desc)
-        if rt == "intern" and not config.INCLUDE_INTERNSHIPS:
+        mode = location_accept(j.get("location", ""))
+        if mode is None:
             continue
+        j["work_mode"] = mode
+        rt = j.get("role_type_hint") or role_type(title, desc)
+        j["notes"] = ""
+        if rt == "intern":
+            if not config.INCLUDE_INTERNSHIPS:
+                continue
+            keep, rt, note = internship_guard(title, desc)
+            if not keep:
+                continue
+            j["notes"] = note
         j["role_type"] = rt
         j["requires_degree"] = requires_degree(title, desc)
         if j["requires_degree"] and config.DEGREE_REQUIREMENT_MODE == "filter":
@@ -709,6 +1002,9 @@ def find_contacts(company, role, client):
     try:
         r = client.messages.create(
             model=OUTREACH_MODEL, max_tokens=1200,
+            # Sonnet 5 runs adaptive thinking by default; disable it so the
+            # small max_tokens budget goes to the answer, not reasoning.
+            thinking={"type": "disabled"},
             tools=[WEB_SEARCH_TOOL],
             messages=[{"role": "user", "content": prompt}],
         )
@@ -720,16 +1016,22 @@ def find_contacts(company, role, client):
         return []
 
 
-def draft_message(company, role, url, contact, client):
+def draft_message(company, role, url, contact, client, desc=""):
     """Draft a short, tailored outreach note from the profile in .env."""
     name = contact.get("name") or "there"
+    snippet = (desc or "").strip()[:400]
     try:
         r = client.messages.create(
             model=OUTREACH_MODEL, max_tokens=600,
+            thinking={"type": "disabled"},
             messages=[{"role": "user", "content": (
                 f"Draft a short outreach note from {YOUR_NAME or 'the candidate'} to {name}, "
                 f"{contact.get('title', '')} at {company}, about the {role} role ({url}).\n"
-                f"Background: {MY_BACKGROUND}\n"
+                + (f"Job description excerpt: {snippet}\n" if snippet else "")
+                + f"Background: {MY_BACKGROUND}\n"
+                f"Positioning: entry-level candidate, under 1 year of professional experience. "
+                f"Be honest about that - lead with genuine interest and concrete projects, and "
+                f"never imply seniority. Mention one specific thing about this role or company.\n"
                 f"Keep it under 90 words, specific, warm, professional. No em-dashes, no emojis.\n"
                 f'Return JSON only: {{"linkedin_message": "(under 280 chars)", "email_subject": "", "email_body": ""}}'
             )}],
@@ -742,11 +1044,15 @@ def draft_message(company, role, url, contact, client):
         return {}
 
 
-def _fallback_contact(company, role):
-    """A usable contact when live research is unavailable (no name, but a real
-    target profile and a LinkedIn search that lands on the right people)."""
+def _fallback_contact(company, role, researched=False):
+    """A usable contact when live research is unavailable or came up empty.
+    Says so explicitly instead of leaving a blank that looks broken."""
+    if researched:
+        name = "(no named contact found - use LinkedIn search)"
+    else:
+        name = "(research off this run - use LinkedIn search)"
     return {
-        "name": "",
+        "name": name,
         "title": "Engineering Recruiter or Hiring Manager",
         "reason": f"Owns or influences hiring for {role} at {company}. Search, then connect.",
         "linkedin_search_url": "https://www.linkedin.com/search/results/people/?keywords="
@@ -755,15 +1061,42 @@ def _fallback_contact(company, role):
     }
 
 
+# Role-family hooks for template drafts. Checked in order; first match wins,
+# so AI/ML outranks the generic software family. Stack names here mirror the
+# default MY_BACKGROUND blurb; personal facts stay in .env.
+_FAMILY_HOOKS = [
+    (("machine learning", " ml ", " ai ", "ai/", "llm", "genai", "research", "applied scientist"),
+     "I have been building applied-AI projects hands-on (RAG pipelines, LLM integrations) and want to do that work on a real team"),
+    (("backend", "back-end", "back end"),
+     "backend work in Python and FastAPI is where I am strongest"),
+    (("frontend", "front-end", "front end", " web "),
+     "I enjoy building clean React and TypeScript interfaces on top of real APIs"),
+    (("full stack", "full-stack", "fullstack", "founding engineer", "product engineer",
+      "software", "developer", "member of technical staff"),
+     "I like owning features end to end, frontend through API and database"),
+]
+
+
+def _role_family_hook(role):
+    t = f" {(role or '').lower()} "
+    for keys, hook in _FAMILY_HOOKS:
+        if any(k in t for k in keys):
+            return hook
+    return "I build software end to end and pick things up fast"
+
+
 def _template_draft(company, role):
-    """A profile-based draft used when the Claude draft is unavailable."""
+    """A profile-based draft used when the Claude draft is unavailable.
+    Varies by role family; positioning stays honestly entry-level."""
     name = YOUR_NAME or "the candidate"
+    hook = _role_family_hook(role)
     bg = MY_BACKGROUND or ("I build full-stack and applied-AI features end to end "
                            "(Python, FastAPI, React, TypeScript).")
-    li = (f"Hi, I'm {name}. I saw the {role} opening at {company} and it lines up well with my "
-          f"background in Python, FastAPI, React and applied AI. Open to a quick chat about it?")
+    li = (f"Hi, I'm {name}, an early-career engineer. I saw the {role} opening at {company} and "
+          f"{hook}. Open to a quick chat about it?")
     body = (f"Hi,\n\nI came across the {role} role at {company} and wanted to reach out directly. "
-            f"{bg} I would love to learn more about the team and where I could contribute.\n\n"
+            f"I am an early-career engineer, and {hook}. {bg} "
+            f"I would love to learn more about the team and where I could contribute.\n\n"
             f"Best,\n{name}")
     return {"linkedin_message": li[:280], "email_subject": f"{role} at {company}", "email_body": body}
 
@@ -783,8 +1116,9 @@ def build_outreach(jobs, client, top_n):
             continue
         print(f"  {co} - {role}")
         contacts = find_contacts(co, role, client) if client is not None else []
-        contact = contacts[0] if contacts else _fallback_contact(co, role)
-        msgs = draft_message(co, role, url, contact, client) if (client is not None and contacts) else {}
+        contact = contacts[0] if contacts else _fallback_contact(co, role, researched=client is not None)
+        msgs = (draft_message(co, role, url, contact, client, j.get("description", ""))
+                if (client is not None and contacts) else {})
         if not msgs:
             msgs = _template_draft(co, role)
         outreach.append({
@@ -805,6 +1139,8 @@ def build_outreach(jobs, client, top_n):
 # ===========================================================================
 
 def write_excel(jobs, outreach):
+    """Write the color-coded tracker: Jobs, Outreach, and Legend sheets.
+    Returns the workbook filename."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
@@ -831,7 +1167,7 @@ def write_excel(jobs, outreach):
         ws.append([
             i, j["title"], j["company"], j.get("role_type", ""), j["location"],
             j["source"], posted, j.get("fresh", ""), j.get("rank_score", 0),
-            j["job_url"], "", "Not Applied", "",
+            j["job_url"], "", "Not Applied", j.get("notes", ""),
         ])
         color = (
             "F1948A" if ha < 1 else      # red: under 1 hour, act now
@@ -907,6 +1243,7 @@ def run_pipeline_api(api_key, hours=None, cold_outreach_enabled=True, cold_outre
 
     print(f"\n{'='*60}")
     print(f"  Pipeline run - {datetime.now().strftime('%Y-%m-%d %H:%M')} ({hours}h window)")
+    print(f"  Contact research: ENABLED (key supplied per request)")
     print(f"{'='*60}\n")
 
     extra_keywords = (role_keywords or []) + (skills or [])
@@ -918,17 +1255,11 @@ def run_pipeline_api(api_key, hours=None, cold_outreach_enabled=True, cold_outre
 
     outreach = build_outreach(jobs, client, config.OUTREACH_TOP_N) if jobs else []
 
+    # Cold outreach runs standalone via cold_outreach.py; the in-pipeline
+    # integration was removed. cold_outreach_enabled/cold_outreach_limit are
+    # still accepted for API compatibility, and the empty list keeps the web
+    # UI's Cold Outreach tab rendering its empty state.
     cold_contacts = []
-    if cold_outreach_enabled:
-        try:
-            from openpyxl import Workbook as _WB
-            from cold_outreach import run_cold_outreach, build_config as _co_cfg
-            co_config = _co_cfg()
-            co_config["cold_outreach_max_per_day"] = cold_outreach_limit
-            co_config["anthropic_api_key"] = api_key
-            cold_contacts = run_cold_outreach(_WB(), co_config, gmail_service=None)
-        except Exception as e:
-            print(f"WARNING: [Cold Outreach] {e}")
 
     return {
         "jobs": jobs,
@@ -945,38 +1276,11 @@ def run_pipeline_api(api_key, hours=None, cold_outreach_enabled=True, cold_outre
 
 
 # ===========================================================================
-# Gmail (used only to create cold-outreach drafts; never sends mail)
-# ===========================================================================
-
-def get_gmail():
-    try:
-        from google.oauth2.credentials import Credentials
-        from google_auth_oauthlib.flow import InstalledAppFlow
-        from google.auth.transport.requests import Request
-        from googleapiclient.discovery import build
-        SCOPES = ["https://www.googleapis.com/auth/gmail.compose"]
-        creds = None
-        if Path("token.json").exists():
-            creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                if not Path("credentials.json").exists():
-                    return None
-                creds = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES).run_local_server(port=0)
-            Path("token.json").write_text(creds.to_json())
-        return build("gmail", "v1", credentials=creds)
-    except Exception as e:
-        print(f"WARNING: [Gmail setup] {e}")
-        return None
-
-
-# ===========================================================================
 # CLI
 # ===========================================================================
 
 def main():
+    """CLI entry point: parse flags, run the pipeline, write the Excel tracker."""
     p = argparse.ArgumentParser(description="EarlyBird job search pipeline")
     p.add_argument("--hours", type=int, default=config.DEFAULT_HOURS,
                    help="Lookback window in hours")
@@ -987,21 +1291,7 @@ def main():
     p.add_argument("--limit", type=int, default=None, help="Cap number of jobs")
     p.add_argument("--no-email", action="store_true",
                    help="Deprecated no-op; outreach is draft-only and never sends mail")
-    p.add_argument("--test-cold-outreach", action="store_true",
-                   help="Dry-run the cold-outreach module against one source, two companies")
     args = p.parse_args()
-
-    if args.test_cold_outreach:
-        from openpyxl import Workbook as _WB
-        from cold_outreach import run_cold_outreach, build_config as _co_cfg
-        print("\n" + "=" * 60 + "\n  Cold Outreach - TEST RUN\n" + "=" * 60)
-        test_wb = _WB()
-        contacts = run_cold_outreach(test_wb, _co_cfg(), gmail_service=None,
-                                     test_mode=True, test_source_limit=1, test_company_limit=2)
-        fname = f"test_cold_outreach_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.xlsx"
-        test_wb.save(fname)
-        print(f"\n  TEST COMPLETE - {len(contacts)} contact(s) | Output: {fname}\n")
-        sys.exit(0)
 
     fresh_mode = args.fresh
     hours = config.FRESH_HOURS if fresh_mode else args.hours
@@ -1020,9 +1310,16 @@ def main():
         client = anthropic.Anthropic(api_key=api_key)
 
     mode = "FRESH poll" if fresh_mode else ("scrape-only" if args.scrape_only else "standard")
+    if client is not None:
+        research_line = "ENABLED (live web research + tailored drafts)"
+    elif fresh_mode:
+        research_line = "DISABLED (--fresh mode: outreach skipped entirely)"
+    else:
+        research_line = "DISABLED (scrape-only: fallback contacts + template drafts)"
     print(f"\n{'='*60}")
     print(f"  EarlyBird - {datetime.now().strftime('%Y-%m-%d %H:%M')} ({mode})")
     print(f"  Companies: {len(COMPANIES)} | Window: {hours}h")
+    print(f"  Contact research: {research_line}")
     print(f"{'='*60}\n")
 
     raw, stats = collect_jobs(hours)
@@ -1045,16 +1342,6 @@ def main():
         outreach = build_outreach(jobs, client, config.OUTREACH_TOP_N)
 
     fname, wb = write_excel(jobs, outreach)
-
-    if do_claude:
-        try:
-            from cold_outreach import run_cold_outreach, build_config as _co_cfg
-            co_config = _co_cfg()
-            if co_config.get("cold_outreach_enabled", True):
-                run_cold_outreach(wb, co_config, gmail_service=get_gmail())
-        except Exception as e:
-            print(f"WARNING: [Cold Outreach] {e}")
-
     wb.save(fname)
 
     if not fresh_mode:

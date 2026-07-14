@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import Badge from '../components/Badge'
 
 const STATUS_BADGE = { new: 'green', draft: 'blue', sent: 'pink' }
@@ -14,10 +14,12 @@ function initialsFrom(name) {
     .toUpperCase()
 }
 
-export default function Outreach({ pipeline, loading }) {
+export default function Outreach({ pipeline }) {
   const [selected, setSelected] = useState(0)
 
   const contacts = pipeline?.outreach || []
+  // Clamp at render time; keeps the index valid when a new run shrinks the list.
+  const active = selected < contacts.length ? selected : 0
 
   if (!pipeline) {
     return (
@@ -27,11 +29,7 @@ export default function Outreach({ pipeline, loading }) {
       </div>
     )
   }
-  const contact = contacts[selected] || contacts[0] || {}
-
-  useEffect(() => {
-    if (selected >= contacts.length) setSelected(0)
-  }, [contacts, selected])
+  const contact = contacts[active] || {}
 
   return (
     <div className="grid grid-cols-3 gap-4 h-full">
@@ -50,7 +48,7 @@ export default function Outreach({ pipeline, loading }) {
               key={`${name}-${i}`}
               onClick={() => setSelected(i)}
               className={`w-full text-left p-4 rounded-xl border transition-all ${
-                selected === i
+                active === i
                   ? 'border-jay-blue bg-blue-50 shadow-sm'
                   : 'border-slate-100 bg-white hover:border-slate-200'
               }`}

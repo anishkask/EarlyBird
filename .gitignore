@@ -14,6 +14,9 @@ companies.json
 # Cold outreach cache (auto-generated, tracks already-contacted companies)
 cold_outreach_cache.json
 
+# Watchlist discovery cache (auto-generated on full runs)
+watchlist_cache.json
+
 # Scraped pipeline output must never land in the publicly served folder
 earlybird-ui/public/pipeline.json
 
@@ -45,6 +48,9 @@ env/
 # Logs
 logs/
 *.log
+
+# Claude Code worktrees and local settings (never track)
+.claude/
 
 # VS Code
 .vscode/

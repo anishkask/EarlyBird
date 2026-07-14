@@ -171,9 +171,9 @@ export default function Settings({ settings, onSave, onRun }) {
         <ol className="space-y-2 text-xs text-slate-600 list-decimal list-inside">
           <li>Enter your Anthropic API key above and click <strong>Save Settings</strong>.</li>
           <li>Click <strong>Run Pipeline Now</strong> (or the button in the sidebar).</li>
-          <li>The pipeline scrapes Greenhouse, Lever, LinkedIn, and Wellfound for intern postings.</li>
+          <li>The pipeline polls Greenhouse, Lever, Ashby, YC, Remotive, and RemoteOK for paid roles.</li>
           <li>Claude researches contacts at each company and drafts outreach messages.</li>
-          <li>Results appear in Job Leads, Outreach, and Cold Outreach tabs (3-5 minutes).</li>
+          <li>Results appear in Job Leads and Outreach tabs (3-5 minutes).</li>
         </ol>
         <p className="text-xs text-slate-400 pt-2">
           Your API key is sent directly to the backend and discarded after each run — it is never stored on the server.

@@ -77,6 +77,7 @@ app.add_middleware(
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    """Attach defensive headers to every response."""
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
@@ -141,6 +142,7 @@ def _rate_limited_locked(ip: str) -> bool:
 # Request models with strict validation
 # ---------------------------------------------------------------------------
 class PipelineRequest(BaseModel):
+    """Body of POST /run-pipeline. The API key is used for the run only."""
     anthropic_api_key: str = Field(..., min_length=20, max_length=200)
     hours: int = Field(72, ge=1, le=168)
     cold_outreach: bool = True
@@ -165,6 +167,7 @@ class PipelineRequest(BaseModel):
 
 
 class SettingsRequest(BaseModel):
+    """Body of POST /settings. Validated but never persisted server-side."""
     anthropic_api_key: str = Field("", max_length=200)
     target_locations: List[str] = Field(default_factory=list, max_length=25)
     role_keywords: List[str] = Field(default_factory=list, max_length=25)
@@ -213,11 +216,14 @@ def _background_run(run_id: str, api_key: str, hours: int, cold_outreach: bool, 
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
+    """Liveness probe used by the frontend and the hosting platform."""
     return {"status": "ok"}
 
 
 @app.post("/run-pipeline")
 async def run_pipeline(req: PipelineRequest, request: Request):
+    """Start a pipeline run in a background thread and return its run_id.
+    Enforces per-IP rate limiting and a global concurrency cap first."""
     ip = _client_ip(request)
     with _lock:
         _purge_expired_locked()
@@ -249,6 +255,7 @@ async def run_pipeline(req: PipelineRequest, request: Request):
 
 @app.get("/status/{run_id}")
 async def get_status(run_id: str):
+    """Report a run's lifecycle state: queued, running, complete, or error."""
     with _lock:
         _purge_expired_locked()
         run = _runs.get(run_id)
@@ -264,6 +271,7 @@ async def get_status(run_id: str):
 
 @app.get("/results/{run_id}")
 async def get_results(run_id: str):
+    """Return a completed run's full results; 409 while still in progress."""
     with _lock:
         _purge_expired_locked()
         run = _runs.get(run_id)
@@ -279,7 +287,8 @@ async def get_results(run_id: str):
 
 @app.post("/settings")
 async def save_settings(req: SettingsRequest):
-    # Session-only — nothing is persisted on the server.
+    """Validate settings for the session. Deliberately a no-op server-side:
+    preferences live in the browser and are sent with each run request."""
     return {"status": "ok"}
 
 

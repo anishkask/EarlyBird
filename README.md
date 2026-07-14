@@ -1,259 +1,172 @@
 # EarlyBird
 
-> Apply before everyone else does.
+Job search automation that surfaces attainable engineering roles within hours of posting and cuts outreach prep to minutes.
 
-EarlyBird is a job search automation tool for engineers who want to see fresh paid roles within hours of posting, before listings hit mass job boards and inboxes flood with applicants. It targets full-time, contract, and contract-to-hire roles in the AI/ML and full-stack space.
+New engineering roles get hundreds of applicants within a day of reaching the big job boards. EarlyBird attacks that from both ends: it polls company ATS APIs directly, so roles appear here before they hit aggregators, and it filters hard for attainability, so an early-career engineer sees only roles they can realistically get -- right level, right track, right geography, paid. For the top matches it then researches a real outreach contact at the company (live web search, never guessed) and drafts a short personalized message, turning "found a posting" into "ready to send" in one run.
 
-It polls company ATS systems (Greenhouse, Lever, Ashby) for a config-driven watchlist plus the RemoteOK board, ranks roles by freshness and profile match, drafts a short outreach message for the top results using the Claude API with live web search, and writes a color-coded Excel tracker. It also runs behind a FastAPI server with a React dashboard.
+Live demo: [earlybird-ashen.vercel.app](https://earlybird-ashen.vercel.app)
+
+## Demo video
+
+<!-- DEMO VIDEO: to add it, edit this README on github.com and drag your
+     .mp4 or .mov file onto the line below. GitHub uploads it and inserts a
+     user-attachments URL that renders as an embedded player. Keep the file
+     under 10 MB (roughly 60 to 90 seconds of screen recording). -->
+
+*Demo video coming soon.*
+
+## What a run produces
+
+**Web dashboard** (`earlybird-ui/`): enter an Anthropic API key, click Run Pipeline, and browse ranked job leads and researched outreach contacts in the browser.
+
+**Excel tracker** (CLI): a color-coded workbook with three sheets:
+
+- `Jobs` -- ranked roles with type, location, source, posting age, apply link, and application-status columns. Roles under 1 hour old are flagged; the rank score puts the most attainable, freshest roles on top.
+- `Outreach` -- for the top-ranked roles, a researched contact (name, title, LinkedIn) and a tailored draft message.
+- `Legend` -- what the colors and rank signals mean.
+
+<!-- SCREENSHOTS: drop PNG files into docs/screenshots/ and update these paths.
+     Suggested captures: the dashboard job list, the Excel Jobs sheet. -->
 
 ## Architecture
 
-EarlyBird has three parts:
+```mermaid
+flowchart LR
+    subgraph Sources
+        GH[Greenhouse ATS]
+        LV[Lever ATS]
+        AB[Ashby ATS]
+        YC[YC Work at a Startup]
+        RV[Remotive]
+        RO[RemoteOK]
+    end
+    Sources --> C[collect_jobs\nper-source isolation]
+    C --> F[process_jobs\nfilter, rank, dedupe]
+    F --> X[Excel tracker\nopenpyxl]
+    F --> O[Outreach research\nClaude + live web search]
+    F --> A[FastAPI backend]
+    A --> UI[React dashboard]
+```
 
-1. Pipeline (`job_pipeline_full.py`, `cold_outreach.py`): the core scraping, contact research, and outreach logic. Runs from the CLI and writes Excel, or is called by the API.
-2. Backend (`api.py`): a FastAPI server that runs the pipeline in a background thread and returns results as JSON. Each visitor supplies their own Anthropic API key per request.
-3. Frontend (`earlybird-ui/`): a React + Vite + Tailwind dashboard. Users enter their key, run the pipeline, and view jobs and contacts in the browser.
+Three deployable parts share one pipeline:
 
-Live site: [earlybird-ashen.vercel.app](https://earlybird-ashen.vercel.app)
+1. **Pipeline** (`job_pipeline_full.py`): scraping, filtering, ranking, outreach research, Excel output. Runs standalone from the CLI.
+2. **Backend** (`api.py`): FastAPI server that runs the pipeline in a background thread and serves results as JSON. Visitors supply their own API key per request; nothing is stored.
+3. **Frontend** (`earlybird-ui/`): React + Vite + Tailwind dashboard, deployed on Vercel.
 
-## Features
+## Engineering decisions
 
-- Pulls from stable, terms-respecting endpoints only: Greenhouse, Lever, and Ashby ATS JSON APIs, plus the RemoteOK JSON board
-- Targets paid roles (full-time, contract, contract-to-hire) and filters internships out by default
-- Detects and deprioritizes roles that require a conferred degree, without ever filtering on visa sponsorship
-- Ranks every role by freshness, profile keyword match, and paid role type, then dedupes across sources
-- Flags urgency: roles under 1 hour old are highlighted red, under 6 hours green
-- For the top ranked roles, researches a likely outreach contact with the Claude API (live web search) and drafts a short tailored message
-- Sources, target companies, keywords, and filters are all controlled from a single `config.py`
-- Fast `--fresh` mode for frequent polling so you see new roles first
-- Color-coded Excel tracker with apply links, posting age, rank, and role type
-- LinkedIn and Indeed scraping is removed from the default run (anti-bot fragility and terms conflicts); it remains behind a config flag, off by default
+**ATS JSON endpoints instead of scraping job boards.** LinkedIn and Indeed actively fight scrapers, break integrations without notice, and prohibit scraping in their terms. Greenhouse, Lever, and Ashby publish documented JSON APIs for their public boards; YC Work at a Startup embeds its listings as JSON and permits crawling in robots.txt. Building on stable, terms-respecting endpoints means the pipeline degrades predictably instead of silently rotting. JobSpy (LinkedIn/Indeed) exists behind a config flag but ships disabled.
 
-## Using the live site
+**Filters fail open, and a real bug is the reason.** An early version classified roles as internships by substring, so "intern" matched "Internal Tools" and silently dropped legitimate full-time roles on every run for weeks. The fix (word-bounded regex) shaped a policy applied across the pipeline: token matching on short words is word-bounded, blank locations pass rather than drop, and postings that are ambiguous about pay or enrollment are kept with a "verify" note in the tracker instead of discarded. A filter that quietly over-drops is worse than one that under-drops, because its output looks plausible.
 
-1. Open [earlybird-ashen.vercel.app](https://earlybird-ashen.vercel.app)
-2. Go to Settings and enter your Anthropic API key. The key is held in memory for the session only. It is never written to disk or stored on the server.
-3. Optionally set your school, target locations, role keywords, and skills, then click Save Settings.
-4. Click Run Pipeline. The run starts in the background and the page polls for status every 5 seconds.
-5. After a few minutes, results appear in the Job Leads, Outreach, and Cold Outreach tabs.
+**Ranking optimizes for attainability, not just freshness.** A brand-new staff role at a unicorn is useless to an early-career candidate. The rank score rewards entry/mid title signals, smaller companies (using the company's ATS board size as a headcount proxy), stack keyword match, remote eligibility, and paid role types that convert fastest -- and penalizes seniority markers and degree requirements. Freshness matters but is deliberately weighted so it cannot outrank attainability.
 
-A run takes roughly 3 to 5 minutes depending on how many companies have fresh postings.
+**Layered filtering with a title-level track gate.** Roles pass through independent, individually tunable gates: profile relevance, on-track title (with an allow-list for startup titles like "Founding Engineer" and "Member of Technical Staff" that carry no standard keyword), seniority ceiling, off-target function and ops/infra exclusion, years-of-experience cap, and a geography gate that accepts US-eligible remote or listed metros only. Each gate lives in `config.py`, so retuning the search never means touching pipeline logic.
+
+**Per-source isolation.** Every source is wrapped so a timeout, dead board slug, or schema change costs exactly that source's results for that run -- never the run. Failures print warnings with the source name; silent `except: pass` is banned in this codebase for the same reason the intern bug was dangerous.
+
+**Contact research must cite the live web.** Outreach contacts come from Claude with the web search tool explicitly attached; without it the model would fall back to training data and invent plausible names. Fields that cannot be verified stay blank. A fabricated contact is worse than no contact.
+
+**Bring-your-own-key security model.** The hosted demo takes each visitor's Anthropic key per request, uses it for that run only, and never logs or stores it. Results are keyed by unguessable high-entropy tokens, auto-expire after 30 minutes, and sit behind per-IP rate limiting and a concurrency cap. The frontend ships CSP, HSTS, and frame-denial headers.
+
+## Tech stack
+
+- **Pipeline/backend:** Python 3.10+, FastAPI, Uvicorn, Anthropic SDK (with the `web_search_20250305` tool), openpyxl, BeautifulSoup, requests
+- **Frontend:** React 19, Vite, Tailwind CSS
+- **Hosting:** Vercel (frontend), Render (backend)
+
+## Setup
+
+```bash
+git clone <this repo> && cd earlybird
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+source .venv/bin/activate       # Mac/Linux
+pip install -r requirements.txt
+cp .env.example .env            # then fill in ANTHROPIC_API_KEY at minimum
+```
+
+## Run modes (CLI)
+
+```bash
+python job_pipeline_full.py                  # standard: scrape + rank + outreach research
+python job_pipeline_full.py --fresh          # fast poll: short window, no API calls
+python job_pipeline_full.py --scrape-only    # scrape + Excel only, no API key needed
+python job_pipeline_full.py --hours 24       # custom lookback window
+```
+
+| Mode | Claude API calls | Use case |
+| ---- | ---------------- | -------- |
+| standard | yes (top `OUTREACH_TOP_N` roles) | daily run with outreach drafts |
+| `--fresh` | no | frequent polling for brand-new postings |
+| `--scrape-only` | no | testing filters, no funded key needed |
+
+All modes scrape every source enabled in `config.SOURCES` and write the Excel tracker.
+
+## Run the web UI locally
+
+```bash
+# Terminal 1: backend on :8000
+uvicorn api:app --reload --port 8000
+
+# Terminal 2: frontend on :5173
+cd earlybird-ui && npm install && npm run dev
+```
+
+The frontend defaults to `http://localhost:8000` for the API; override with `VITE_API_URL` in `earlybird-ui/.env.local`.
 
 ## Configuration
 
-Everything you tune lives in `config.py`, so you never edit core logic. Nothing personal or secret belongs here (see note below).
+Everything tunable lives in `config.py`; secrets and identity live in `.env` and are read via environment variables only.
 
-Relevance and sources:
-- `PROFILE_KEYWORDS`: keywords that define relevance and drive ranking (high, core, and adjacent tiers).
-- `SOURCES`: turn each source on or off. Greenhouse, Lever, Ashby, and RemoteOK are on by default; Wellfound and JobSpy (LinkedIn/Indeed) are off.
-- `WATCHLIST`: target companies as `{name, ats_type, slug}` (Greenhouse/Lever). Slugs that no longer resolve are skipped gracefully.
-- `ASHBY_COMPANIES`: Ashby board slugs (Ashby skews to startups).
+- `SOURCES` -- toggle each job source
+- `WATCHLIST` / `ASHBY_COMPANIES` -- target companies per ATS
+- `PROFILE_KEYWORDS` -- relevance and ranking keywords in three weight tiers
+- `TRACK_TITLE_KEYWORDS` / `TRACK_TITLE_ALLOW` -- the title-level track gate and its startup-title allow-list
+- `SENIORITY_EXCLUDE`, `FUNCTION_EXCLUDE`, `OPS_INFRA_EXCLUDE`, `MAX_YEARS` -- exclusion gates
+- `ACCEPT_REMOTE` / `ACCEPTED_METROS` -- geography gate
+- `INCLUDE_INTERNSHIPS`, `DEGREE_REQUIREMENT_MODE` -- role-type policy
+- `LARGE_BOARD_THRESHOLD` / `SMALL_BOARD_THRESHOLD` -- company-size ranking proxy
+- `DEFAULT_HOURS`, `FRESH_HOURS`, `OUTREACH_TOP_N` -- run tuning
 
-Role and seniority filters (tune to your own level):
-- `SENIORITY_EXCLUDE`: title terms to drop (default excludes staff/principal/lead/senior/manager/director and similar).
-- `MAX_YEARS`: drop roles whose description requires at least this many years of experience.
-- `ENTRY_MID_SIGNALS`: title terms that mark an entry/mid role, used for a ranking bonus.
-- `FUNCTION_EXCLUDE`: off-target functions to drop (default excludes security, IT, SRE, hardware, data science, sales/solutions engineering, and similar).
-- `INCLUDE_INTERNSHIPS`, `DEGREE_REQUIREMENT_MODE`, `REMOTE_OK`.
-
-Company targeting:
-- `EXCLUDE_COMPANIES`: companies to drop entirely (matched as a lowercase substring of the company name).
-- `LARGE_BOARD_THRESHOLD` / `SMALL_BOARD_THRESHOLD`: a company-size proxy based on how many roles its ATS board lists. Small boards get a ranking bonus, large boards a penalty.
-
-Run tuning:
-- `DEFAULT_HOURS`, `FRESH_HOURS`, `OUTREACH_TOP_N`.
-
-Ranking is attainability-aware: it rewards entry/mid level, smaller companies, stack-keyword match, and freshness, and penalizes high seniority and large or excluded companies.
-
-Secrets and personal identity stay in `.env` and never go in `config.py`. Your name, background, and API keys are read from environment variables at runtime, so nothing identifying is committed to the repo.
-
-### Watchlist and discovery
-
-The watchlist is `config.WATCHLIST` plus any companies confirmed by discovery. On a full run, EarlyBird verifies company names from the cold-outreach cache against live Greenhouse and Lever endpoints and stores the confirmed ones in `watchlist_cache.json` for future runs. Loading the watchlist never makes network calls, so runs start instantly.
-
-Note on stable endpoints: ai-jobs.net exposes no stable public feed, so it is intentionally not integrated. RemoteOK covers AI-board listings through its documented JSON API instead.
-
-## Security
-
-The site is designed to be used by any visitor with their own API key, so it takes the following precautions:
-
-- API keys are accepted per request, used only for that run, and never logged, written to disk, or stored in the run record.
-- Pipeline results contain personal contact data, so each run is keyed by a high-entropy, unguessable token. Unknown or expired tokens return 404, which closes insecure-direct-object-reference access.
-- Runs auto-expire after 30 minutes and the in-memory store is size-capped, so personal data does not linger.
-- Per-IP rate limiting and a concurrency cap bound abuse and resource exhaustion.
-- Strict input validation on every field. Raw exceptions are logged on the server and never returned to clients.
-- CORS is restricted to the deployed frontend origin. Interactive API docs are disabled.
-- The frontend sends a Content-Security-Policy, HSTS, X-Frame-Options, and related headers. API key inputs disable browser autofill and storage.
-
-## Local development
-
-### Backend
-
-```bash
-pip install -r requirements.txt
-uvicorn api:app --reload --port 8000
-```
-
-The API is then available at `http://localhost:8000`. Check `http://localhost:8000/health`.
-
-### Frontend
-
-```bash
-cd earlybird-ui
-npm install
-npm run dev
-```
-
-Set `VITE_API_URL` so the frontend knows where the backend is. Create `earlybird-ui/.env.local`:
-
-```
-VITE_API_URL=http://localhost:8000
-```
-
-If `VITE_API_URL` is not set, the frontend defaults to `http://localhost:8000`.
-
-## CLI usage
-
-The CLI writes a color-coded Excel tracker locally.
-
-```bash
-# Standard run (config.DEFAULT_HOURS lookback), with outreach drafting
-python job_pipeline_full.py
-
-# Fast poll: short window (config.FRESH_HOURS), scrape and Excel only, no Claude calls
-python job_pipeline_full.py --fresh
-
-# Custom lookback window
-python job_pipeline_full.py --hours 24
-
-# Scrape and write Excel only, skip all Claude API calls
-python job_pipeline_full.py --scrape-only
-```
-
-Run modes at a glance:
-
-| Mode | Sources | Outreach drafting | Speed |
-| ---- | ------- | ----------------- | ----- |
-| `--fresh` | ATS + RemoteOK | no | fastest, for frequent polling |
-| `--scrape-only` | ATS + RemoteOK | no | fast, no API key needed |
-| standard | ATS + RemoteOK | yes (top `OUTREACH_TOP_N`) | slower, needs a funded key |
-
-Secrets and identity go in `.env`:
-
-```bash
-cp .env.example .env
-```
-
-```
-ANTHROPIC_API_KEY=sk-ant-...
-YOUR_NAME=Your Name
-YOUR_EMAIL=you@email.com
-YOUR_LINKEDIN=https://linkedin.com/in/yourhandle
-MY_BACKGROUND=Brief summary of your skills and experience
-```
-
-Outreach is draft-only. EarlyBird never sends email on your behalf.
-
-## API endpoints
+## API
 
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
-| GET | `/health` | Liveness check. Returns `{"status":"ok"}` |
-| POST | `/run-pipeline` | Starts a run. Body includes `anthropic_api_key`, `hours`, `cold_outreach`, `cold_outreach_limit`. Returns `run_id` |
-| GET | `/status/{run_id}` | Returns the run status: queued, running, complete, or error |
-| GET | `/results/{run_id}` | Returns the full results JSON once the run is complete |
-| POST | `/settings` | Validates preferences for the session. Nothing is persisted |
+| GET | `/health` | Liveness check |
+| POST | `/run-pipeline` | Start a run; returns an unguessable `run_id` |
+| GET | `/status/{run_id}` | Run status: queued, running, complete, error |
+| GET | `/results/{run_id}` | Full results once complete |
+| POST | `/settings` | Validate session preferences; nothing persisted |
 
 ## Deployment
 
-The frontend is hosted on Vercel and the backend on Render. Both deploy from the `main` branch.
-
-### Backend (Render)
-
-The backend is defined in `render.yaml`. To create the service the first time:
-
-1. On Render, choose New, then Web Service, and connect this repository.
-2. Branch: `main`. Build command: `pip install -r requirements.txt`. Start command: `uvicorn api:app --host 0.0.0.0 --port $PORT`.
-3. Choose the free instance type and create the service.
-4. Copy the resulting URL, for example `https://earlybird-api.onrender.com`.
-
-### Frontend (Vercel)
-
-1. The Vercel project root directory is `earlybird-ui`.
-2. Add an environment variable `VITE_API_URL` set to the Render backend URL.
-3. Vercel builds with `npm run build` and serves the `dist` output.
-
-## Redeploying
-
-### Redeploy the frontend
-
-Vercel rebuilds automatically on every push to `main`. To trigger a deploy manually instead:
-
-- From the dashboard: open the Vercel project, go to Deployments, open the most recent deployment menu, and choose Redeploy.
-- From the CLI: `cd earlybird-ui && npx vercel --prod`.
-
-If you change `VITE_API_URL`, redeploy afterward so the new value is baked into the build.
-
-### Redeploy the backend
-
-`render.yaml` sets `autoDeploy: false`, so pushing to `main` does not deploy on its own. To deploy the latest commit:
-
-- From the dashboard: open the `earlybird-api` service, choose Manual Deploy, then Deploy latest commit.
-- To deploy on every push instead, set `autoDeploy: true` in `render.yaml` or enable auto-deploy in the service settings.
-
-After a backend redeploy, confirm it is healthy by opening `https://YOUR-RENDER-URL/health`.
-
-## Stack
-
-Pipeline and backend:
-
-- Python 3.10 or newer
-- FastAPI and Uvicorn
-- [Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python) with the `web_search_20250305` tool
-- openpyxl, BeautifulSoup, requests, python-dotenv
-- [JobSpy](https://github.com/cullenwatson/JobSpy) is an optional, disabled-by-default source for LinkedIn and Indeed
-
-Frontend:
-
-- React and Vite
-- Tailwind CSS v3
-- Hosted on Vercel
+- **Backend (Render):** defined in `render.yaml`; `autoDeploy` is off, so deploys are manual from the dashboard. Free tier sleeps when idle; first request after sleep takes about 30 seconds.
+- **Frontend (Vercel):** project root is `earlybird-ui`, `VITE_API_URL` points at the Render URL, security headers ship via `earlybird-ui/vercel.json`.
 
 ## Scheduling
 
-For speed-to-first-sight, poll frequently with the fast `--fresh` mode. It needs no API key and skips outreach.
-
-Windows (Task Scheduler), `run_earlybird.bat`:
-
-```bat
-@echo off
-cd C:\path\to\EarlyBird
-python job_pipeline_full.py --fresh >> logs\pipeline_log.txt 2>&1
-```
-
-Add a trigger that runs it every few hours. Run the standard mode (with outreach) once a day.
-
-Mac / Linux (cron):
+Poll frequently with `--fresh` (no API key needed) and run standard mode once daily:
 
 ```bash
-crontab -e
-# Fast poll every 2 hours:
-0 */2 * * * cd /path/to/EarlyBird && python job_pipeline_full.py --fresh >> logs/pipeline_log.txt 2>&1
-# Full run with outreach each morning at 8:
-0 8 * * * cd /path/to/EarlyBird && python job_pipeline_full.py >> logs/pipeline_log.txt 2>&1
+# cron: fast poll every 2 hours, full run each morning
+0 */2 * * * cd /path/to/earlybird && python job_pipeline_full.py --fresh >> logs/pipeline_log.txt 2>&1
+0 8 * * *   cd /path/to/earlybird && python job_pipeline_full.py >> logs/pipeline_log.txt 2>&1
 ```
 
-## Notes
+On Windows, the equivalent is a Task Scheduler job running the same commands.
 
-- LinkedIn and Indeed scraping (JobSpy) is off by default because it breaks on anti-bot measures and conflicts with those sites' terms. Enabling it in `config.py` is at your own discretion.
-- Never commit `.env`, `token.json`, `credentials.json`, or `*.xlsx` files. All are listed in `.gitignore`.
-- The Render free tier sleeps after a period of inactivity. The first request after it sleeps takes around 30 seconds to wake the service.
+## Limitations and future work
 
-## Roadmap
+Honest accounting of where this stands:
 
-- Resume-to-job matching using embeddings
-- Daily digest summarizing each morning's run
-- Wider default watchlist and Ashby coverage
+- **Volume depends on watchlist quality.** ATS polling only sees companies on the list. The watchlist skews to AI startups by design; a different candidate would retune it in `config.py`.
+- **Aggregator boards are thin for software roles.** Remotive carries few software-dev listings inside a one-week window, and RemoteOK's public API feed is not dev-filtered. Both are kept because they are nearly free to poll, but ATS boards and YC carry the real supply.
+- **Contract roles do not live on ATS boards.** Staffing platforms (Toptal, Upwork, Braintrust) gate listings behind login and anti-bot measures, so contract discovery stays manual by choice.
+- **YC listings carry no per-job timestamps**, so they are treated as 48 hours old and never flag as fresh.
+- **No automated test suite.** Filter logic has been validated with scripted assertion checks (the intern/internal regression among them), but those scripts are not yet committed as a proper test suite.
+- Planned: resume-to-job matching via embeddings, a morning digest, and wider Ashby coverage.
 
 ## License
 

@@ -18,6 +18,13 @@ function ageColor(ageH) {
 export default function Jobs({ pipeline, loading }) {
   const [search, setSearch] = useState('')
   const [source, setSource] = useState('All')
+  const jobs = useMemo(() => pipeline?.jobs || [], [pipeline])
+
+  // Hooks must run on every render, so this stays above the empty-state return.
+  const sources = useMemo(() => {
+    const distinct = Array.from(new Set(jobs.map(j => j.source).filter(Boolean)))
+    return ['All', ...distinct]
+  }, [jobs])
 
   if (!loading && !pipeline) {
     return (
@@ -27,11 +34,6 @@ export default function Jobs({ pipeline, loading }) {
       </div>
     )
   }
-
-  const sources = useMemo(() => {
-    const distinct = Array.from(new Set(jobs.map(j => j.source).filter(Boolean)))
-    return ['All', ...distinct]
-  }, [jobs])
 
   const filtered = jobs.filter(j => {
     const q = search.toLowerCase()

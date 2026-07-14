@@ -2,7 +2,7 @@ import BluejayLogo from './BluejayLogo'
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard',     icon: DashIcon },
-  { id: 'jobs',      label: 'Job Leads',     icon: BriefcaseIcon, badge: 12 },
+  { id: 'jobs',      label: 'Job Leads',     icon: BriefcaseIcon },
   { id: 'outreach',  label: 'Outreach',      icon: MailIcon },
   { id: 'cold',      label: 'Cold Outreach', icon: SearchIcon },
   { id: 'settings',  label: 'Settings',      icon: GearIcon },
@@ -24,7 +24,7 @@ export default function Sidebar({ page, setPage, onRun }) {
 
       {/* Nav */}
       <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto scrollbar-thin">
-        {NAV.map(({ id, label, icon: Icon, badge }) => {
+        {NAV.map(({ id, label, icon: Icon }) => {
           const active = page === id
           return (
             <button
@@ -38,11 +38,6 @@ export default function Sidebar({ page, setPage, onRun }) {
             >
               <Icon className="w-4 h-4 flex-shrink-0" />
               <span>{label}</span>
-              {badge && (
-                <span className="ml-auto bg-jay-blue/80 text-white text-xs rounded-full px-1.5 py-0.5 leading-none">
-                  {badge}
-                </span>
-              )}
             </button>
           )
         })}
@@ -57,7 +52,6 @@ export default function Sidebar({ page, setPage, onRun }) {
           <TriangleIcon className="w-3 h-3" />
           Run Pipeline
         </button>
-        <p className="text-slate-500 text-xs text-center mt-2">Last run: 2h ago</p>
       </div>
     </aside>
   )
