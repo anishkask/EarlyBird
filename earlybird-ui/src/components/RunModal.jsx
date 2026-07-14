@@ -1,13 +1,31 @@
 import { useState } from 'react'
 
+// Tolerate keys pasted straight from a .env file ("ANTHROPIC_API_KEY= sk-...").
+function cleanApiKey(k) {
+  return (k || '').replace(/^\s*ANTHROPIC_API_KEY\s*=\s*/i, '').trim()
+}
+
+// Turn FastAPI's 422 validation detail (an array of error objects) into a
+// readable sentence instead of the generic "Invalid request."
+function readableDetail(detail) {
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    return detail
+      .map(d => `${(d.loc || []).slice(1).join('.') || 'request'}: ${d.msg}`)
+      .join('; ')
+  }
+  return 'Invalid request.'
+}
+
 export default function RunModal({ apiUrl, apiKey: propApiKey, settings, onClose, onComplete }) {
   const [hours, setHours] = useState(72)
   const [coldOutreach, setColdOutreach] = useState(true)
   const [localApiKey, setLocalApiKey] = useState('')
   const [running, setRunning] = useState(false)
   const [statusMsg, setStatusMsg] = useState('')
+  const [errorMsg, setErrorMsg] = useState('')
 
-  const effectiveKey = propApiKey || localApiKey
+  const effectiveKey = cleanApiKey(propApiKey || localApiKey)
 
   const pollStatus = async (runId) => {
     const maxWait = 360000
@@ -21,7 +39,8 @@ export default function RunModal({ apiUrl, apiKey: propApiKey, settings, onClose
           if (res.status === 404) {
             // Run expired or purged from the server before we read it.
             clearInterval(timer)
-            setStatusMsg('Run expired before results could be retrieved. Please run again.')
+            setErrorMsg('Run expired before results could be retrieved. Please run again.')
+            setStatusMsg('')
             setRunning(false)
             resolve()
             return
@@ -42,12 +61,14 @@ export default function RunModal({ apiUrl, apiKey: propApiKey, settings, onClose
             onClose()
           } else if (s === 'error') {
             clearInterval(timer)
-            setStatusMsg(data.error || 'Pipeline run failed.')
+            setErrorMsg(data.error || 'Pipeline run failed.')
+            setStatusMsg('')
             setRunning(false)
             resolve(data)
           } else if (Date.now() - start > maxWait) {
             clearInterval(timer)
-            setStatusMsg('Timed out waiting for pipeline to finish.')
+            setErrorMsg('Timed out waiting for pipeline to finish.')
+            setStatusMsg('')
             setRunning(false)
             resolve()
           }
@@ -59,8 +80,18 @@ export default function RunModal({ apiUrl, apiKey: propApiKey, settings, onClose
   }
 
   const handleRun = async () => {
+    setErrorMsg('')
     if (!effectiveKey) {
-      setStatusMsg('Enter your Anthropic API key to run the pipeline.')
+      setErrorMsg('Enter your Anthropic API key to run the pipeline.')
+      return
+    }
+    if (!effectiveKey.startsWith('sk-ant-')) {
+      setErrorMsg('That does not look like an Anthropic API key — it should start with "sk-ant-".')
+      return
+    }
+    const hoursNum = Number(hours)
+    if (!Number.isInteger(hoursNum) || hoursNum < 1 || hoursNum > 168) {
+      setErrorMsg('Hours Window must be a whole number between 1 and 168.')
       return
     }
     try {
@@ -71,7 +102,7 @@ export default function RunModal({ apiUrl, apiKey: propApiKey, settings, onClose
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           anthropic_api_key: effectiveKey,
-          hours: Number(hours),
+          hours: hoursNum,
           cold_outreach: coldOutreach,
           cold_outreach_limit: 10,
           target_locations: settings?.targetLocations || [],
@@ -83,7 +114,7 @@ export default function RunModal({ apiUrl, apiKey: propApiKey, settings, onClose
         let detail = `Server error: ${res.status}`
         try {
           const err = await res.json()
-          if (err.detail) detail = typeof err.detail === 'string' ? err.detail : 'Invalid request.'
+          if (err.detail) detail = readableDetail(err.detail)
         } catch { /* non-JSON error body */ }
         throw new Error(detail)
       }
@@ -92,7 +123,8 @@ export default function RunModal({ apiUrl, apiKey: propApiKey, settings, onClose
       await pollStatus(run_id)
     } catch (e) {
       console.error('Run failed:', e)
-      setStatusMsg(`Error: ${e.message}`)
+      setErrorMsg(e.message)
+      setStatusMsg('')
       setRunning(false)
     }
   }
@@ -104,6 +136,13 @@ export default function RunModal({ apiUrl, apiKey: propApiKey, settings, onClose
         <p className="text-slate-400 text-sm mb-5">
           {running ? statusMsg || 'Starting...' : 'Configure and launch a scrape run'}
         </p>
+
+        {errorMsg && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+            <p className="text-sm font-medium text-red-700">Run could not start</p>
+            <p className="text-xs text-red-600 mt-1 leading-relaxed">{errorMsg}</p>
+          </div>
+        )}
 
         {!running && (
           <div className="space-y-4 mb-6">
@@ -132,10 +171,13 @@ export default function RunModal({ apiUrl, apiKey: propApiKey, settings, onClose
               <label className="text-xs text-slate-500 font-medium block mb-1">Hours Window</label>
               <input
                 type="number"
+                min={1}
+                max={168}
                 value={hours}
                 onChange={e => setHours(e.target.value)}
                 className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-jay-blue"
               />
+              <p className="text-xs text-slate-400 mt-1">Lookback window, 1 to 168 hours (7 days)</p>
             </div>
             <Toggle label="Include Cold Outreach" value={coldOutreach} onChange={setColdOutreach} />
           </div>
