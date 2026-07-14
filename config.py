@@ -16,7 +16,7 @@ PROFILE_KEYWORDS = {
     # Strong signals for the AI/ML niche (weight 3)
     "high": [
         "rag", "llm", "agent", "agentic", "embedding", "vector db", "vector database",
-        "fine-tune", "fine tuning", "genai", "generative ai", "prompt", "inference",
+        "fine-tune", "fine tuning", "ai", "genai", "generative ai", "prompt", "inference",
         "retrieval-augmented", "langchain", "llamaindex",
     ],
     # Core stack (weight 2)

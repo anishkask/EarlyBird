@@ -945,6 +945,11 @@ def process_jobs(raw, extra_keywords=None, target_locations=None):
         if mode is None:
             continue
         j["work_mode"] = mode
+        # A remote-eligible role must read as remote everywhere (UI + Excel),
+        # never as an onsite role in a city we don't accept ("San Francisco,
+        # CA (Hybrid) OR Remote (...)" led with San Francisco).
+        if mode == "remote" and not j.get("location", "").lower().startswith("remote"):
+            j["location"] = f"Remote / {j['location']}"
         rt = j.get("role_type_hint") or role_type(title, desc)
         j["notes"] = ""
         if rt == "intern":
